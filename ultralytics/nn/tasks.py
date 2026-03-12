@@ -760,11 +760,39 @@ class RTDETRDetectionModel(DetectionModel):
         m.valid_mask = fn(m.valid_mask)
         return self
 
+    def _sync_rtdetr_head_runtime_args(self):
+        """Sync runtime args into RT-DETR head for train/infer consistency after checkpoint load."""
+        args = getattr(self, "args", None)
+        if args is None:
+            return
+
+        get = (lambda k, d: args.get(k, d)) if isinstance(args, dict) else (lambda k, d: getattr(args, k, d))
+        head = self.model[-1]
+        head.query_rerank_mode = get("query_rerank_mode", getattr(head, "query_rerank_mode", "none"))
+        head.center_lambda_max = get("center_lambda_max", getattr(head, "center_lambda_max", 0.25))
+        head.center_lambda_warmup_epochs = get(
+            "center_lambda_warmup_epochs", getattr(head, "center_lambda_warmup_epochs", 10)
+        )
+        head.center_score_norm = get("center_score_norm", getattr(head, "center_score_norm", "zscore_image"))
+        head.center_score_clip = get("center_score_clip", getattr(head, "center_score_clip", 6.0))
+        if not hasattr(head, "enc_center_head"):
+            head.enc_center_head = torch.nn.Linear(head.hidden_dim, 1).to(head.enc_score_head.weight.device)
+
     def init_criterion(self):
         """Initialize the loss criterion for the RTDETRDetectionModel."""
         from ultralytics.models.utils.loss import RTDETRDetectionLoss
 
-        return RTDETRDetectionLoss(nc=self.nc, use_vfl=True)
+        args = getattr(self, "args", DEFAULT_CFG_DICT)
+        arg = (lambda k, d: args.get(k, d)) if isinstance(args, dict) else (lambda k, d: getattr(args, k, d))
+        return RTDETRDetectionLoss(
+            nc=self.nc,
+            use_vfl=True,
+            center_loss_weight=arg("center_loss_weight", 0.5),
+            center_pos_alpha=arg("center_pos_alpha", 4.0),
+            center_empty_scale=arg("center_empty_scale", 0.25),
+            center_target=arg("center_target", "box_centerness"),
+            center_multi_gt_rule=arg("center_multi_gt_rule", "max"),
+        )
 
     def loss(self, batch, preds=None):
         """Compute the loss for the given batch of data.
@@ -791,10 +819,18 @@ class RTDETRDetectionModel(DetectionModel):
             "batch_idx": batch_idx.to(img.device, dtype=torch.long).view(-1),
             "gt_groups": gt_groups,
         }
+        if "epoch" in batch:
+            targets["epoch"] = int(batch["epoch"])
+        if "num_epochs" in batch:
+            targets["num_epochs"] = int(batch["num_epochs"])
 
         if preds is None:
             preds = self.predict(img, batch=targets)
-        dec_bboxes, dec_scores, enc_bboxes, enc_scores, dn_meta = preds if self.training else preds[1]
+        raw = preds if self.training else preds[1]
+        dec_bboxes, dec_scores, enc_bboxes, enc_scores, dn_meta = raw[:5]
+        center_logits = raw[5] if len(raw) > 5 else None
+        center_points = raw[6] if len(raw) > 6 else None
+        center_valid_mask = raw[7] if len(raw) > 7 else None
         if dn_meta is None:
             dn_bboxes, dn_scores = None, None
         else:
@@ -805,7 +841,14 @@ class RTDETRDetectionModel(DetectionModel):
         dec_scores = torch.cat([enc_scores.unsqueeze(0), dec_scores])
 
         loss = self.criterion(
-            (dec_bboxes, dec_scores), targets, dn_bboxes=dn_bboxes, dn_scores=dn_scores, dn_meta=dn_meta
+            (dec_bboxes, dec_scores),
+            targets,
+            dn_bboxes=dn_bboxes,
+            dn_scores=dn_scores,
+            dn_meta=dn_meta,
+            center_logits=center_logits,
+            center_points=center_points,
+            center_valid_mask=center_valid_mask,
         )
         # NOTE: There are like 12 losses in RTDETR, backward with all losses but only show the main three losses.
         return sum(loss.values()), torch.as_tensor(
@@ -826,6 +869,7 @@ class RTDETRDetectionModel(DetectionModel):
         Returns:
             (torch.Tensor): Model's output tensor.
         """
+        self._sync_rtdetr_head_runtime_args()
         y, dt, embeddings = [], [], []  # outputs
         embed = frozenset(embed) if embed is not None else {-1}
         max_idx = max(embed)

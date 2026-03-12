@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from copy import copy
 
+import torch.nn as nn
+
 from ultralytics.models.yolo.detect import DetectionTrainer
 from ultralytics.nn.tasks import RTDETRDetectionModel
 from ultralytics.utils import RANK, colorstr
@@ -57,6 +59,19 @@ class RTDETRTrainer(DetectionTrainer):
             model.load(weights)
         return model
 
+    def set_model_attributes(self):
+        """Set model and RT-DETR-head attributes from dataset and train args."""
+        super().set_model_attributes()
+        head = self.model.model[-1]
+        # Force-set for backward compatibility with old checkpoints that may not contain new attrs.
+        head.query_rerank_mode = self.args.query_rerank_mode
+        head.center_lambda_max = self.args.center_lambda_max
+        head.center_lambda_warmup_epochs = self.args.center_lambda_warmup_epochs
+        head.center_score_norm = self.args.center_score_norm
+        head.center_score_clip = self.args.center_score_clip
+        if not hasattr(head, "enc_center_head"):
+            head.enc_center_head = nn.Linear(head.hidden_dim, 1).to(head.enc_score_head.weight.device)
+
     def build_dataset(self, img_path: str, mode: str = "val", batch: int | None = None):
         """Build and return an RT-DETR dataset for training or validation.
 
@@ -82,6 +97,13 @@ class RTDETRTrainer(DetectionTrainer):
             data=self.data,
             fraction=self.args.fraction if mode == "train" else 1.0,
         )
+
+    def preprocess_batch(self, batch):
+        """Preprocess batch and append epoch metadata for head-side lambda warmup."""
+        batch = super().preprocess_batch(batch)
+        batch["epoch"] = self.epoch
+        batch["num_epochs"] = self.epochs
+        return batch
 
     def get_validator(self):
         """Return an RTDETRValidator suitable for RT-DETR model validation."""

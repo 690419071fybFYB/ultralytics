@@ -1468,6 +1468,11 @@ class RTDETRDecoder(nn.Module):
         label_noise_ratio: float = 0.5,
         box_noise_scale: float = 1.0,
         learnt_init_query: bool = False,
+        query_rerank_mode: str = "none",
+        center_lambda_max: float = 0.25,
+        center_lambda_warmup_epochs: int = 10,
+        center_score_norm: str = "zscore_image",
+        center_score_clip: float = 6.0,
     ):
         """Initialize the RTDETRDecoder module with the given parameters.
 
@@ -1487,6 +1492,11 @@ class RTDETRDecoder(nn.Module):
             label_noise_ratio (float): Label noise ratio.
             box_noise_scale (float): Box noise scale.
             learnt_init_query (bool): Whether to learn initial query embeddings.
+            query_rerank_mode (str): Query reranking mode, either 'none' or 'center'.
+            center_lambda_max (float): Max lambda for center-aware reranking.
+            center_lambda_warmup_epochs (int): Epochs to warm up lambda from 0 to max.
+            center_score_norm (str): Center score normalization mode, e.g. 'zscore_image'.
+            center_score_clip (float): Optional clip value for fused rerank score.
         """
         super().__init__()
         self.hidden_dim = hd
@@ -1495,6 +1505,11 @@ class RTDETRDecoder(nn.Module):
         self.nc = nc
         self.num_queries = nq
         self.num_decoder_layers = ndl
+        self.query_rerank_mode = query_rerank_mode
+        self.center_lambda_max = center_lambda_max
+        self.center_lambda_warmup_epochs = center_lambda_warmup_epochs
+        self.center_score_norm = center_score_norm
+        self.center_score_clip = center_score_clip
 
         # Backbone feature projection
         self.input_proj = nn.ModuleList(nn.Sequential(nn.Conv2d(x, hd, 1, bias=False), nn.BatchNorm2d(hd)) for x in ch)
@@ -1520,6 +1535,7 @@ class RTDETRDecoder(nn.Module):
         # Encoder head
         self.enc_output = nn.Sequential(nn.Linear(hd, hd), nn.LayerNorm(hd))
         self.enc_score_head = nn.Linear(hd, nc)
+        self.enc_center_head = nn.Linear(hd, 1)
         self.enc_bbox_head = MLP(hd, hd, 4, num_layers=3)
 
         # Decoder head
@@ -1557,7 +1573,9 @@ class RTDETRDecoder(nn.Module):
             self.training,
         )
 
-        embed, refer_bbox, enc_bboxes, enc_scores = self._get_decoder_input(feats, shapes, dn_embed, dn_bbox)
+        embed, refer_bbox, enc_bboxes, enc_scores, enc_center_logits, center_points, center_valid_mask = (
+            self._get_decoder_input(feats, shapes, dn_embed, dn_bbox, batch=batch)
+        )
 
         # Decoder
         dec_bboxes, dec_scores = self.decoder(
@@ -1570,7 +1588,7 @@ class RTDETRDecoder(nn.Module):
             self.query_pos_head,
             attn_mask=attn_mask,
         )
-        x = dec_bboxes, dec_scores, enc_bboxes, enc_scores, dn_meta
+        x = dec_bboxes, dec_scores, enc_bboxes, enc_scores, dn_meta, enc_center_logits, center_points, center_valid_mask
         if self.training:
             return x
         # (bs, 300, 4+nc)
@@ -1648,7 +1666,8 @@ class RTDETRDecoder(nn.Module):
         shapes: list[list[int]],
         dn_embed: torch.Tensor | None = None,
         dn_bbox: torch.Tensor | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        batch: dict | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None, torch.Tensor, torch.Tensor]:
         """Generate and prepare the input required for the decoder from the provided features and shapes.
 
         Args:
@@ -1662,6 +1681,9 @@ class RTDETRDecoder(nn.Module):
             refer_bbox (torch.Tensor): Reference bounding boxes.
             enc_bboxes (torch.Tensor): Encoded bounding boxes.
             enc_scores (torch.Tensor): Encoded scores.
+            enc_center_logits (torch.Tensor | None): Center logits over all encoder tokens.
+            center_points (torch.Tensor): Encoder token center coordinates in normalized xy, shape (N, 2).
+            center_valid_mask (torch.Tensor): Encoder token valid mask, shape (N,).
         """
         bs = feats.shape[0]
         if self.dynamic or self.shapes != shapes:
@@ -1680,9 +1702,34 @@ class RTDETRDecoder(nn.Module):
         features = self.enc_output(self.valid_mask * feats)  # bs, h*w, 256
         enc_outputs_scores = self.enc_score_head(features)  # (bs, h*w, nc)
 
+        # Prepare query ranking scores
+        cls_scores = enc_outputs_scores.max(-1).values
+        query_rerank_mode = str(getattr(self, "query_rerank_mode", "none")).lower()
+        if query_rerank_mode == "center":
+            if hasattr(self, "enc_center_head"):
+                enc_outputs_center = self.enc_center_head(features).squeeze(-1)  # (bs, h*w)
+            else:
+                enc_outputs_center = torch.zeros_like(cls_scores)
+            center_score_norm = str(getattr(self, "center_score_norm", "zscore_image")).lower()
+            if center_score_norm == "zscore_image":
+                cls_rank = self._zscore_image(cls_scores)
+                center_rank = self._zscore_image(enc_outputs_center)
+            else:
+                cls_rank = cls_scores
+                center_rank = enc_outputs_center
+            fused_scores = cls_rank + self._center_lambda(batch) * center_rank
+            score_clip = float(getattr(self, "center_score_clip", 6.0))
+            if score_clip > 0:
+                fused_scores = fused_scores.clamp(-score_clip, score_clip)
+            query_scores = fused_scores
+            center_logits = enc_outputs_center
+        else:
+            query_scores = cls_scores
+            center_logits = None
+
         # Query selection
         # (bs*num_queries,)
-        topk_ind = torch.topk(enc_outputs_scores.max(-1).values, self.num_queries, dim=1).indices.view(-1)
+        topk_ind = torch.topk(query_scores, self.num_queries, dim=1).indices.view(-1)
         # (bs*num_queries,)
         batch_ind = torch.arange(end=bs, dtype=topk_ind.dtype).unsqueeze(-1).repeat(1, self.num_queries).view(-1)
 
@@ -1707,7 +1754,32 @@ class RTDETRDecoder(nn.Module):
         if dn_embed is not None:
             embeddings = torch.cat([dn_embed, embeddings], 1)
 
-        return embeddings, refer_bbox, enc_bboxes, enc_scores
+        center_points = self.anchors[..., :2].sigmoid().squeeze(0)
+        center_valid_mask = self.valid_mask.squeeze(0).squeeze(-1)
+        return embeddings, refer_bbox, enc_bboxes, enc_scores, center_logits, center_points, center_valid_mask
+
+    @staticmethod
+    def _zscore_image(scores: torch.Tensor, eps: float = 1e-6, var_eps: float = 1e-8) -> torch.Tensor:
+        """Apply per-image z-score normalization to scores with near-zero variance protection."""
+        mean = scores.mean(dim=1, keepdim=True)
+        var = scores.var(dim=1, unbiased=False, keepdim=True)
+        z = (scores - mean) / torch.sqrt(var + eps)
+        return torch.where(var > var_eps, z, torch.zeros_like(z))
+
+    def _center_lambda(self, batch: dict | None) -> float:
+        """Return center-reranking lambda with epoch warmup in training and fixed value in inference."""
+        lam = max(float(getattr(self, "center_lambda_max", 0.25)), 0.0)
+        if not self.training:
+            return lam
+
+        warmup_epochs = max(float(getattr(self, "center_lambda_warmup_epochs", 10)), 0.0)
+        if warmup_epochs == 0.0:
+            return lam
+        if batch is None or "epoch" not in batch:
+            return lam
+        epoch = float(batch["epoch"])
+        ratio = min(max(epoch / warmup_epochs, 0.0), 1.0)
+        return lam * ratio
 
     def _reset_parameters(self):
         """Initialize or reset the parameters of the model's various components with predefined weights and biases."""
@@ -1716,6 +1788,8 @@ class RTDETRDecoder(nn.Module):
         # NOTE: the weight initialization in `linear_init` would cause NaN when training with custom datasets.
         # linear_init(self.enc_score_head)
         constant_(self.enc_score_head.bias, bias_cls)
+        if hasattr(self, "enc_center_head"):
+            constant_(self.enc_center_head.bias, 0.0)
         constant_(self.enc_bbox_head.layers[-1].weight, 0.0)
         constant_(self.enc_bbox_head.layers[-1].bias, 0.0)
         for cls_, reg_ in zip(self.dec_score_head, self.dec_bbox_head):
