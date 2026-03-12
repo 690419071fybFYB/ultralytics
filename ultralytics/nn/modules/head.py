@@ -1668,6 +1668,14 @@ class RTDETRDecoder(nn.Module):
             self.anchors, self.valid_mask = self._generate_anchors(shapes, dtype=feats.dtype, device=feats.device)
             self.shapes = shapes
 
+        # TensorBoard graph tracing (or any inference-mode warmup on the live training model) can cache anchors/masks
+        # as inference tensors. Clone once before backprop to keep training graph valid.
+        if self.training:
+            if hasattr(self.valid_mask, "is_inference") and self.valid_mask.is_inference():
+                self.valid_mask = self.valid_mask.clone()
+            if hasattr(self.anchors, "is_inference") and self.anchors.is_inference():
+                self.anchors = self.anchors.clone()
+
         # Prepare input for decoder
         features = self.enc_output(self.valid_mask * feats)  # bs, h*w, 256
         enc_outputs_scores = self.enc_score_head(features)  # (bs, h*w, nc)

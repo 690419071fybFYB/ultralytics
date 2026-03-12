@@ -62,10 +62,11 @@ def _log_tensorboard_graph(trainer) -> None:
     p = next(trainer.model.parameters())  # for device, type
     im = torch.zeros((1, 3, *imgsz), device=p.device, dtype=p.dtype)  # input image (must be zeros, not empty)
 
-    # Try simple method first (YOLO)
+    # Try simple method first (YOLO). Use a deepcopy to avoid mutating cached tensors in the live training model.
     try:
-        trainer.model.eval()  # place in .eval() mode to avoid BatchNorm statistics changes
-        WRITER.add_graph(torch.jit.trace(torch_utils.unwrap_model(trainer.model), im, strict=False), [])
+        model = deepcopy(torch_utils.unwrap_model(trainer.model))
+        model.eval()
+        WRITER.add_graph(torch.jit.trace(model, im, strict=False), [])
         LOGGER.info(f"{PREFIX}model graph visualization added ✅")
         return
     except Exception as e1:

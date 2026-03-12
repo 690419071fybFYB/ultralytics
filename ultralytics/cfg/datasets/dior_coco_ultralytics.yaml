@@ -1,0 +1,26 @@
+path: /home/fyb/datasets/DIOR_COCO_ULTRA
+train: images/train2017
+val: images/val2017
+test: images/test2017
+
+names:
+  0: airplane
+  1: airport
+  2: baseballfield
+  3: basketballcourt
+  4: bridge
+  5: chimney
+  6: dam
+  7: expressway-service-area
+  8: expressway-toll-station
+  9: golffield
+  10: groundtrackfield
+  11: harbor
+  12: overpass
+  13: ship
+  14: stadium
+  15: storagetank
+  16: tennis-court
+  17: trainstation
+  18: vehicle
+  19: windmill

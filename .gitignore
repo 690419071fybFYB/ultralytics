@@ -150,6 +150,9 @@ dmypy.json
 # datasets and projects (ignore /datasets dir at root only to allow for docs/en/datasets dir)
 /datasets
 runs/
+project2/runs/
+project2/data/dior_official/*.txt
+project2/data/dior_official/dior_official.yaml
 wandb/
 .DS_Store
 
