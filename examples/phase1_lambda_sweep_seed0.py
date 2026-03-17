@@ -14,7 +14,6 @@ from pathlib import Path
 
 from ultralytics import RTDETR
 
-
 REPO_ROOT = Path(__file__).resolve().parents[1]
 TRAIN_SCRIPT = REPO_ROOT / "examples" / "train_rtdetr_dior.py"
 
@@ -93,7 +92,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def lambda_to_tag(value: float) -> str:
-    return f"{int(round(value * 100)):03d}"
+    return f"{round(value * 100):03d}"
 
 
 def parse_lambdas(text: str) -> list[float]:

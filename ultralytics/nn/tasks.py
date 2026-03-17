@@ -777,9 +777,7 @@ class RTDETRDetectionModel(DetectionModel):
         head.center_score_clip = get("center_score_clip", getattr(head, "center_score_clip", 6.0))
         head.query_quota_mode = get("query_quota_mode", getattr(head, "query_quota_mode", "none"))
         head.query_level_ratios = get("query_level_ratios", getattr(head, "query_level_ratios", ""))
-        head.query_quota_min_per_level = get(
-            "query_quota_min_per_level", getattr(head, "query_quota_min_per_level", 0)
-        )
+        head.query_quota_min_per_level = get("query_quota_min_per_level", getattr(head, "query_quota_min_per_level", 0))
         if not hasattr(head, "enc_center_head"):
             head.enc_center_head = torch.nn.Linear(head.hidden_dim, 1).to(head.enc_score_head.weight.device)
 

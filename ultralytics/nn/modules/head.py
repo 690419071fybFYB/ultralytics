@@ -1828,11 +1828,11 @@ class RTDETRDecoder(nn.Module):
 
         nq = self.num_queries
         raw = [r * nq for r in ratios]
-        quotas = [int(math.floor(v)) for v in raw]
+        quotas = [math.floor(v) for v in raw]
         remain = nq - sum(quotas)
         if remain > 0:
             # Distribute leftovers by descending fractional part.
-            order = sorted(range(nl), key=lambda i: (raw[i] - quotas[i]), reverse=True)
+            order = sorted(range(nl), key=lambda i: raw[i] - quotas[i], reverse=True)
             for i in order[:remain]:
                 quotas[i] += 1
 
@@ -1929,11 +1929,7 @@ class RTDETRDecoder(nn.Module):
                 used[chosen] = True
                 picks.append(chosen)
 
-            idx = (
-                torch.cat(picks, dim=0)
-                if picks
-                else torch.empty(0, device=query_scores.device, dtype=torch.long)
-            )
+            idx = torch.cat(picks, dim=0) if picks else torch.empty(0, device=query_scores.device, dtype=torch.long)
 
             if idx.numel() < self.num_queries:
                 mask = ~used

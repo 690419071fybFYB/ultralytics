@@ -8,7 +8,6 @@ import csv
 import math
 from pathlib import Path
 
-
 T_CRIT_95 = {
     1: 12.7062047364,
     2: 4.30265272975,

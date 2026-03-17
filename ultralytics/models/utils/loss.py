@@ -452,9 +452,7 @@ class RTDETRDetectionLoss(DETRLoss):
             if self.center_multi_gt_rule == "max":
                 targets[bi] = centerness.max(dim=1).values
             else:
-                raise ValueError(
-                    f"Unsupported center_multi_gt_rule='{self.center_multi_gt_rule}'. Supported: 'max'."
-                )
+                raise ValueError(f"Unsupported center_multi_gt_rule='{self.center_multi_gt_rule}'. Supported: 'max'.")
 
         return targets
 

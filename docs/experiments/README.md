@@ -1,6 +1,7 @@
 # Experiment Notebook
 
 ## Project Context
+
 - Task: DIOR 遥感目标检测，基线模型为 RT-DETR（Ultralytics 实现）。
 - Dataset YAML: `/home/fyb/datasets/DIOR_COCO_ULTRA/dior_coco_ultralytics.yaml`。
 - Baseline run: `/home/fyb/mydir/ultralytics/runs/detect/runs/train/rtdetr_dior5`。
@@ -10,22 +11,23 @@
 
 ## Phase Timeline
 
-| Phase | Topic | Status | Start Date | End Date | Notes |
-|---|---|---|---|---|---|
-| Phase 1 | Center-aware Query Reranking | Pass | 2026-03-13 | 2026-03-15 | λ 扫描完成，门槛通过 |
-| Phase 2 | Per-level Query Quota | Running | 2026-03-16 | - | 当前在跑 `phase2_quota_none_lam035_seed0_e40` |
-| Phase 3 | Reference Point Bias (planned) | Planned | - | - | 仅在 Phase 2 通过后启动 |
+| Phase   | Topic                          | Status  | Start Date | End Date   | Notes                                         |
+| ------- | ------------------------------ | ------- | ---------- | ---------- | --------------------------------------------- |
+| Phase 1 | Center-aware Query Reranking   | Pass    | 2026-03-13 | 2026-03-15 | λ 扫描完成，门槛通过                          |
+| Phase 2 | Per-level Query Quota          | Running | 2026-03-16 | -          | 当前在跑 `phase2_quota_none_lam035_seed0_e40` |
+| Phase 3 | Reference Point Bias (planned) | Planned | -          | -          | 仅在 Phase 2 通过后启动                       |
 
 ## Phase Summary Table
 
-| Phase | Goal | Core Change | Best Result | Gate Decision | Detail |
-|---|---|---|---|---|---|
-| Phase 1 | 验证 `center_lambda_max` 是否提升中心先验重排效果 | `S_fuse = z(cls) + λ*z(center)` | test mAP50-95: `0.553459` (`λ=0.35`) | Pass | [phase1_center_rerank.md](./phase1_center_rerank.md) |
-| Phase 2 | 验证固定配额的多尺度 query 选择是否进一步提升 | `query_quota_mode=fixed` + `query_level_ratios` | 进行中（首个对照 run 已到 epoch 6） | Pending | [phase2_quota.md](./phase2_quota.md) |
+| Phase   | Goal                                              | Core Change                                     | Best Result                          | Gate Decision | Detail                                               |
+| ------- | ------------------------------------------------- | ----------------------------------------------- | ------------------------------------ | ------------- | ---------------------------------------------------- |
+| Phase 1 | 验证 `center_lambda_max` 是否提升中心先验重排效果 | `S_fuse = z(cls) + λ*z(center)`                 | test mAP50-95: `0.553459` (`λ=0.35`) | Pass          | [phase1_center_rerank.md](./phase1_center_rerank.md) |
+| Phase 2 | 验证固定配额的多尺度 query 选择是否进一步提升     | `query_quota_mode=fixed` + `query_level_ratios` | 进行中（首个对照 run 已到 epoch 6）  | Pending       | [phase2_quota.md](./phase2_quota.md)                 |
 
 ## Repro Commands
 
 ### Phase 1 (lambda sweep, seed=0)
+
 ```bash
 cd /home/fyb/mydir/ultralytics
 /home/fyb/envs/torch-cuda/bin/python examples/phase1_lambda_sweep_seed0.py \
@@ -34,6 +36,7 @@ cd /home/fyb/mydir/ultralytics
 ```
 
 ### Phase 2 (quota sweep, seed=0, sequential)
+
 ```bash
 cd /home/fyb/mydir/ultralytics
 /home/fyb/envs/torch-cuda/bin/python -u examples/train_rtdetr_dior.py \
@@ -47,6 +50,7 @@ cd /home/fyb/mydir/ultralytics
 ```
 
 ## Quality Check Commands
+
 ```bash
 # 1) 检查关键记录文件是否存在
 ls -la docs/experiments
@@ -62,6 +66,7 @@ pgrep -af "phase2_quota"
 ```
 
 ## Links
+
 - Phase 1 Detail: [phase1_center_rerank.md](./phase1_center_rerank.md)
 - Phase 2 Detail: [phase2_quota.md](./phase2_quota.md)
 - Generic Phase Template: [templates/phase_template.md](./templates/phase_template.md)
