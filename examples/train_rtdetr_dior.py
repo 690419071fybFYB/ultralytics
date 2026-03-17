@@ -35,6 +35,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--batch", type=int, default=16, help="Batch size.")
     parser.add_argument("--device", type=str, default="0", help='Device, e.g. "0", "0,1", or "cpu".')
     parser.add_argument("--workers", type=int, default=1, help="Data loader workers.")
+    parser.add_argument("--seed", type=int, default=0, help="Random seed.")
     parser.add_argument(
         "--cache",
         type=str,
@@ -67,6 +68,25 @@ def parse_args() -> argparse.Namespace:
         help="Center score normalization mode.",
     )
     parser.add_argument("--center-score-clip", type=float, default=6.0, help="Clip for fused rerank score.")
+    parser.add_argument(
+        "--query-quota-mode",
+        type=str,
+        default="none",
+        choices=("none", "fixed"),
+        help="Query selection quota mode.",
+    )
+    parser.add_argument(
+        "--query-level-ratios",
+        type=str,
+        default="0.5,0.3,0.2",
+        help="Per-level query ratios when query-quota-mode=fixed.",
+    )
+    parser.add_argument(
+        "--query-quota-min-per-level",
+        type=int,
+        default=0,
+        help="Minimum selected queries per feature level in fixed quota mode.",
+    )
     parser.add_argument("--center-loss-weight", type=float, default=0.5, help="Center loss weight.")
     parser.add_argument("--center-pos-alpha", type=float, default=4.0, help="Positive reweight alpha in center loss.")
     parser.add_argument("--center-empty-scale", type=float, default=0.25, help="Loss scale for images without GT.")
@@ -100,6 +120,7 @@ def main() -> None:
         batch=args.batch,
         device=args.device,
         workers=args.workers,
+        seed=args.seed,
         cache=cache,
         project=args.project,
         name=args.name,
@@ -109,6 +130,9 @@ def main() -> None:
         center_lambda_warmup_epochs=args.center_lambda_warmup_epochs,
         center_score_norm=args.center_score_norm,
         center_score_clip=args.center_score_clip,
+        query_quota_mode=args.query_quota_mode,
+        query_level_ratios=args.query_level_ratios,
+        query_quota_min_per_level=args.query_quota_min_per_level,
         center_loss_weight=args.center_loss_weight,
         center_pos_alpha=args.center_pos_alpha,
         center_empty_scale=args.center_empty_scale,

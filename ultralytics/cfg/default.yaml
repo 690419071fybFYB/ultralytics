@@ -44,6 +44,9 @@ center_lambda_max: 0.25 # (float) max lambda for center-aware reranking
 center_lambda_warmup_epochs: 10 # (int) warmup epochs to ramp lambda from 0 to max
 center_score_norm: zscore_image # (str) score normalization mode for reranking, e.g. 'zscore_image'
 center_score_clip: 6.0 # (float) optional clamp range for fused rerank score, <=0 disables clip
+query_quota_mode: none # (str) RT-DETR query quota mode: 'none' or 'fixed'
+query_level_ratios: "0.5,0.3,0.2" # (str) per-level query ratios when query_quota_mode='fixed'
+query_quota_min_per_level: 0 # (int) minimum selected queries per feature level in fixed quota mode
 
 # Segmentation
 overlap_mask: True # (bool) merge instance masks into one mask during training (segment only)

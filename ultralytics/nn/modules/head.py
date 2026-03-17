@@ -1473,6 +1473,9 @@ class RTDETRDecoder(nn.Module):
         center_lambda_warmup_epochs: int = 10,
         center_score_norm: str = "zscore_image",
         center_score_clip: float = 6.0,
+        query_quota_mode: str = "none",
+        query_level_ratios: str | list[float] | tuple[float, ...] = "",
+        query_quota_min_per_level: int = 0,
     ):
         """Initialize the RTDETRDecoder module with the given parameters.
 
@@ -1497,6 +1500,9 @@ class RTDETRDecoder(nn.Module):
             center_lambda_warmup_epochs (int): Epochs to warm up lambda from 0 to max.
             center_score_norm (str): Center score normalization mode, e.g. 'zscore_image'.
             center_score_clip (float): Optional clip value for fused rerank score.
+            query_quota_mode (str): Query selection quota mode, either 'none' or 'fixed'.
+            query_level_ratios (str | list[float] | tuple[float, ...]): Per-level query ratios for fixed quota mode.
+            query_quota_min_per_level (int): Minimum number of selected queries per feature level.
         """
         super().__init__()
         self.hidden_dim = hd
@@ -1510,6 +1516,9 @@ class RTDETRDecoder(nn.Module):
         self.center_lambda_warmup_epochs = center_lambda_warmup_epochs
         self.center_score_norm = center_score_norm
         self.center_score_clip = center_score_clip
+        self.query_quota_mode = query_quota_mode
+        self.query_level_ratios = query_level_ratios
+        self.query_quota_min_per_level = query_quota_min_per_level
 
         # Backbone feature projection
         self.input_proj = nn.ModuleList(nn.Sequential(nn.Conv2d(x, hd, 1, bias=False), nn.BatchNorm2d(hd)) for x in ch)
@@ -1728,8 +1737,10 @@ class RTDETRDecoder(nn.Module):
             center_logits = None
 
         # Query selection
+        # (bs, num_queries)
+        topk_ind = self._select_query_indices(query_scores, shapes, self.valid_mask)
         # (bs*num_queries,)
-        topk_ind = torch.topk(query_scores, self.num_queries, dim=1).indices.view(-1)
+        topk_ind = topk_ind.view(-1)
         # (bs*num_queries,)
         batch_ind = torch.arange(end=bs, dtype=topk_ind.dtype).unsqueeze(-1).repeat(1, self.num_queries).view(-1)
 
@@ -1780,6 +1791,183 @@ class RTDETRDecoder(nn.Module):
         epoch = float(batch["epoch"])
         ratio = min(max(epoch / warmup_epochs, 0.0), 1.0)
         return lam * ratio
+
+    def _parse_level_ratios(self, nl: int) -> list[float] | None:
+        """Parse and normalize per-level ratios for fixed query quota mode."""
+        raw = getattr(self, "query_level_ratios", "")
+        values = []
+        if isinstance(raw, str):
+            parts = [p.strip() for p in raw.replace(";", ",").split(",") if p.strip()]
+            if not parts:
+                return None
+            try:
+                values = [float(p) for p in parts]
+            except ValueError:
+                return None
+        elif isinstance(raw, (list, tuple)):
+            try:
+                values = [float(x) for x in raw]
+            except (TypeError, ValueError):
+                return None
+        else:
+            return None
+
+        if len(values) != nl or any(v < 0 for v in values):
+            return None
+        s = sum(values)
+        if s <= 0:
+            return None
+        return [v / s for v in values]
+
+    def _allocate_level_quotas(self, level_sizes: list[int]) -> list[int]:
+        """Allocate per-level query quotas from ratios with integer rounding."""
+        nl = len(level_sizes)
+        ratios = self._parse_level_ratios(nl)
+        if ratios is None:
+            ratios = [1.0 / max(nl, 1)] * nl
+
+        nq = self.num_queries
+        raw = [r * nq for r in ratios]
+        quotas = [int(math.floor(v)) for v in raw]
+        remain = nq - sum(quotas)
+        if remain > 0:
+            # Distribute leftovers by descending fractional part.
+            order = sorted(range(nl), key=lambda i: (raw[i] - quotas[i]), reverse=True)
+            for i in order[:remain]:
+                quotas[i] += 1
+
+        min_per = max(int(getattr(self, "query_quota_min_per_level", 0)), 0)
+        if min_per > 0:
+            quotas = [max(q, min_per) for q in quotas]
+
+        total = sum(quotas)
+        if total > nq:
+            overflow = total - nq
+            # Trim from larger bins first; if min quota is too strict, clamp to zero to keep shape valid.
+            order = sorted(range(nl), key=lambda i: quotas[i], reverse=True)
+            for i in order:
+                if overflow <= 0:
+                    break
+                reducible = quotas[i]
+                cut = min(reducible, overflow)
+                quotas[i] -= cut
+                overflow -= cut
+
+        # Never request more than available token count in each level.
+        quotas = [min(q, max(0, sz)) for q, sz in zip(quotas, level_sizes)]
+
+        # If clamping reduced total, fill remaining quota to levels with free capacity.
+        total = sum(quotas)
+        if total < nq:
+            deficit = nq - total
+            order = sorted(range(nl), key=lambda i: ratios[i], reverse=True)
+            for i in order:
+                if deficit <= 0:
+                    break
+                cap = max(0, level_sizes[i] - quotas[i])
+                if cap == 0:
+                    continue
+                add = min(cap, deficit)
+                quotas[i] += add
+                deficit -= add
+
+        return quotas
+
+    def _select_query_indices(
+        self, query_scores: torch.Tensor, shapes: list[list[int]], valid_mask: torch.Tensor | None
+    ) -> torch.Tensor:
+        """Select query indices either by global top-k or fixed per-level quota."""
+        bs, n = query_scores.shape
+        if n <= 0:
+            return torch.zeros((bs, self.num_queries), device=query_scores.device, dtype=torch.long)
+
+        def _global_topk(scores: torch.Tensor) -> torch.Tensor:
+            k = min(self.num_queries, scores.shape[1])
+            idx = torch.topk(scores, k, dim=1).indices
+            if k == self.num_queries:
+                return idx
+            pad = idx[:, :1].repeat(1, self.num_queries - k)
+            return torch.cat([idx, pad], dim=1)
+
+        mode = str(getattr(self, "query_quota_mode", "none")).lower()
+        if mode != "fixed":
+            return _global_topk(query_scores)
+
+        level_sizes = [int(h) * int(w) for h, w in shapes]
+        if sum(level_sizes) != n:
+            return _global_topk(query_scores)
+        quotas = self._allocate_level_quotas(level_sizes)
+        if len(quotas) != len(level_sizes):
+            return _global_topk(query_scores)
+
+        offsets = [0]
+        for size in level_sizes:
+            offsets.append(offsets[-1] + size)
+
+        valid = None
+        if valid_mask is not None:
+            valid = valid_mask.squeeze(0).squeeze(-1).to(device=query_scores.device, dtype=torch.bool)
+            if valid.numel() != n:
+                valid = None
+
+        selected_all = []
+        for bi in range(bs):
+            used = torch.zeros(n, device=query_scores.device, dtype=torch.bool)
+            picks = []
+            for li, quota in enumerate(quotas):
+                if quota <= 0:
+                    continue
+                s, e = offsets[li], offsets[li + 1]
+                level_scores = query_scores[bi, s:e]
+                mask = valid[s:e] if valid is not None else torch.ones_like(level_scores, dtype=torch.bool)
+                cand = torch.nonzero(mask, as_tuple=False).squeeze(1)
+                if cand.numel() == 0:
+                    continue
+                k = min(quota, cand.numel())
+                top_local = torch.topk(level_scores[cand], k, dim=0).indices
+                chosen = cand[top_local] + s
+                used[chosen] = True
+                picks.append(chosen)
+
+            idx = (
+                torch.cat(picks, dim=0)
+                if picks
+                else torch.empty(0, device=query_scores.device, dtype=torch.long)
+            )
+
+            if idx.numel() < self.num_queries:
+                mask = ~used
+                if valid is not None:
+                    mask = mask & valid
+                remaining = torch.nonzero(mask, as_tuple=False).squeeze(1)
+                if remaining.numel() > 0:
+                    k = min(self.num_queries - idx.numel(), remaining.numel())
+                    top_remaining = torch.topk(query_scores[bi, remaining], k, dim=0).indices
+                    idx = torch.cat([idx, remaining[top_remaining]], dim=0)
+
+            if idx.numel() > self.num_queries:
+                keep = torch.topk(query_scores[bi, idx], self.num_queries, dim=0).indices
+                idx = idx[keep]
+
+            if idx.numel() < self.num_queries:
+                global_topk = torch.topk(query_scores[bi], self.num_queries, dim=0).indices
+                if valid is not None:
+                    global_topk = global_topk[valid[global_topk]]
+                if idx.numel() > 0:
+                    chosen = torch.zeros(n, device=query_scores.device, dtype=torch.bool)
+                    chosen[idx] = True
+                    global_topk = global_topk[~chosen[global_topk]]
+                need = self.num_queries - idx.numel()
+                if global_topk.numel() >= need:
+                    idx = torch.cat([idx, global_topk[:need]], dim=0)
+                elif idx.numel() > 0:
+                    idx = torch.cat([idx, idx[:1].repeat(need)], dim=0)
+                else:
+                    idx = torch.cat([idx, torch.zeros(need, device=query_scores.device, dtype=torch.long)], dim=0)
+
+            selected_all.append(idx.unsqueeze(0))
+
+        return torch.cat(selected_all, dim=0)
 
     def _reset_parameters(self):
         """Initialize or reset the parameters of the model's various components with predefined weights and biases."""
