@@ -151,6 +151,10 @@ CLI_HELP_MSG = f"""
 CFG_FLOAT_KEYS = frozenset(
     {  # integer or float arguments, i.e. x=2 and x=2.0
         "warmup_epochs",
+        "center_lambda_max",
+        "center_score_clip",
+        "center_loss_weight",
+        "center_pos_alpha",
         "box",
         "cls",
         "dfl",
@@ -187,6 +191,7 @@ CFG_FRACTION_KEYS = frozenset(
         "iou",
         "fraction",
         "multi_scale",
+        "center_empty_scale",
     }
 )
 CFG_INT_KEYS = frozenset(
@@ -202,6 +207,7 @@ CFG_INT_KEYS = frozenset(
         "line_width",
         "nbs",
         "save_period",
+        "center_lambda_warmup_epochs",
     }
 )
 CFG_BOOL_KEYS = frozenset(

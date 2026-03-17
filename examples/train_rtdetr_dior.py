@@ -35,6 +35,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--batch", type=int, default=16, help="Batch size.")
     parser.add_argument("--device", type=str, default="0", help='Device, e.g. "0", "0,1", or "cpu".')
     parser.add_argument("--workers", type=int, default=1, help="Data loader workers.")
+    parser.add_argument("--seed", type=int, default=0, help="Random seed.")
     parser.add_argument(
         "--cache",
         type=str,
@@ -45,6 +46,64 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--project", type=str, default="runs/train", help="Output project directory.")
     parser.add_argument("--name", type=str, default="rtdetr_dior", help="Experiment name.")
     parser.add_argument("--patience", type=int, default=10, help="Early stopping patience.")
+    parser.add_argument(
+        "--query-rerank-mode",
+        type=str,
+        default="none",
+        choices=("none", "center"),
+        help="RT-DETR query rerank mode.",
+    )
+    parser.add_argument("--center-lambda-max", type=float, default=0.25, help="Max lambda for center reranking.")
+    parser.add_argument(
+        "--center-lambda-warmup-epochs",
+        type=int,
+        default=10,
+        help="Epochs to warm up center lambda.",
+    )
+    parser.add_argument(
+        "--center-score-norm",
+        type=str,
+        default="zscore_image",
+        choices=("zscore_image", "none"),
+        help="Center score normalization mode.",
+    )
+    parser.add_argument("--center-score-clip", type=float, default=6.0, help="Clip for fused rerank score.")
+    parser.add_argument(
+        "--query-quota-mode",
+        type=str,
+        default="none",
+        choices=("none", "fixed"),
+        help="Query selection quota mode.",
+    )
+    parser.add_argument(
+        "--query-level-ratios",
+        type=str,
+        default="0.5,0.3,0.2",
+        help="Per-level query ratios when query-quota-mode=fixed.",
+    )
+    parser.add_argument(
+        "--query-quota-min-per-level",
+        type=int,
+        default=0,
+        help="Minimum selected queries per feature level in fixed quota mode.",
+    )
+    parser.add_argument("--center-loss-weight", type=float, default=0.5, help="Center loss weight.")
+    parser.add_argument("--center-pos-alpha", type=float, default=4.0, help="Positive reweight alpha in center loss.")
+    parser.add_argument("--center-empty-scale", type=float, default=0.25, help="Loss scale for images without GT.")
+    parser.add_argument(
+        "--center-target",
+        type=str,
+        default="box_centerness",
+        choices=("box_centerness",),
+        help="Center supervision target type.",
+    )
+    parser.add_argument(
+        "--center-multi-gt-rule",
+        type=str,
+        default="max",
+        choices=("max",),
+        help="Multi-GT assignment rule for center target.",
+    )
     parser.add_argument("--exist-ok", action="store_true", help="Allow existing project/name directory.")
     parser.add_argument("--resume", action="store_true", help="Resume from latest checkpoint.")
     return parser.parse_args()
@@ -61,10 +120,24 @@ def main() -> None:
         batch=args.batch,
         device=args.device,
         workers=args.workers,
+        seed=args.seed,
         cache=cache,
         project=args.project,
         name=args.name,
         patience=args.patience,
+        query_rerank_mode=args.query_rerank_mode,
+        center_lambda_max=args.center_lambda_max,
+        center_lambda_warmup_epochs=args.center_lambda_warmup_epochs,
+        center_score_norm=args.center_score_norm,
+        center_score_clip=args.center_score_clip,
+        query_quota_mode=args.query_quota_mode,
+        query_level_ratios=args.query_level_ratios,
+        query_quota_min_per_level=args.query_quota_min_per_level,
+        center_loss_weight=args.center_loss_weight,
+        center_pos_alpha=args.center_pos_alpha,
+        center_empty_scale=args.center_empty_scale,
+        center_target=args.center_target,
+        center_multi_gt_rule=args.center_multi_gt_rule,
         exist_ok=args.exist_ok,
         resume=args.resume,
     )

@@ -397,6 +397,115 @@ class RTDETRDetectionLoss(DETRLoss):
     an additional denoising training loss when provided with denoising metadata.
     """
 
+    def __init__(
+        self,
+        *args,
+        center_loss_weight: float = 0.5,
+        center_pos_alpha: float = 4.0,
+        center_empty_scale: float = 0.25,
+        center_target: str = "box_centerness",
+        center_multi_gt_rule: str = "max",
+        **kwargs,
+    ):
+        """Initialize RT-DETR detection loss with optional center-aware query reranking supervision."""
+        super().__init__(*args, **kwargs)
+        self.center_loss_weight = center_loss_weight
+        self.center_pos_alpha = center_pos_alpha
+        self.center_empty_scale = center_empty_scale
+        self.center_target = center_target
+        self.center_multi_gt_rule = center_multi_gt_rule
+
+    def _build_box_centerness_targets(
+        self, center_points: torch.Tensor, gt_bboxes: torch.Tensor, gt_groups: list[int], eps: float = 1e-6
+    ) -> torch.Tensor:
+        """Build per-image centerness targets over encoder token centers."""
+        bs = len(gt_groups)
+        n = center_points.shape[0]
+        targets = center_points.new_zeros((bs, n))
+        if sum(gt_groups) == 0:
+            return targets
+
+        px = center_points[:, 0:1]  # (N, 1)
+        py = center_points[:, 1:2]  # (N, 1)
+
+        offset = 0
+        for bi, num_gt in enumerate(gt_groups):
+            if num_gt == 0:
+                continue
+
+            boxes = gt_bboxes[offset : offset + num_gt]  # xywh in [0,1]
+            offset += num_gt
+            x, y, w, h = boxes.unbind(-1)
+            x1, y1 = x - w * 0.5, y - h * 0.5
+            x2, y2 = x + w * 0.5, y + h * 0.5
+
+            l = px - x1
+            r = x2 - px
+            t = py - y1
+            b = y2 - py
+
+            inside = (l > 0) & (r > 0) & (t > 0) & (b > 0)
+            lr = torch.minimum(l, r) / (torch.maximum(l, r) + eps)
+            tb = torch.minimum(t, b) / (torch.maximum(t, b) + eps)
+            centerness = torch.sqrt((lr * tb).clamp_(0.0, 1.0)) * inside.float()
+
+            if self.center_multi_gt_rule == "max":
+                targets[bi] = centerness.max(dim=1).values
+            else:
+                raise ValueError(f"Unsupported center_multi_gt_rule='{self.center_multi_gt_rule}'. Supported: 'max'.")
+
+        return targets
+
+    def _get_center_loss(
+        self,
+        center_logits: torch.Tensor,
+        center_points: torch.Tensor,
+        center_valid_mask: torch.Tensor | None,
+        gt_bboxes: torch.Tensor,
+        gt_groups: list[int],
+    ) -> torch.Tensor:
+        """Compute weighted BCE loss between center logits and box-centerness targets."""
+        if self.center_target != "box_centerness":
+            raise ValueError(f"Unsupported center_target='{self.center_target}'. Supported: 'box_centerness'.")
+
+        if center_logits.ndim == 3 and center_logits.shape[-1] == 1:
+            center_logits = center_logits.squeeze(-1)
+        if center_logits.ndim != 2:
+            raise ValueError(f"Expected center_logits shape (B, N) or (B, N, 1), got {tuple(center_logits.shape)}")
+
+        targets = self._build_box_centerness_targets(center_points, gt_bboxes, gt_groups)
+        targets = targets.to(device=center_logits.device, dtype=center_logits.dtype)
+        valid = None
+        if center_valid_mask is not None:
+            valid = center_valid_mask.to(device=center_logits.device, dtype=torch.bool).view(1, -1)
+            valid = valid.expand(center_logits.shape[0], -1)
+
+        losses = []
+        for bi in range(center_logits.shape[0]):
+            logit = center_logits[bi]
+            target = targets[bi]
+            if valid is not None:
+                mask = valid[bi]
+                logit = logit[mask]
+                target = target[mask]
+            if logit.numel() == 0:
+                losses.append(center_logits.new_zeros(()))
+                continue
+
+            bce = F.binary_cross_entropy_with_logits(logit, target, reduction="none")
+            weight = 1.0 + self.center_pos_alpha * target
+            per_token = bce * weight
+
+            pos = target > 0
+            num_pos = int(pos.sum().item())
+            if num_pos > 0:
+                loss_i = per_token.sum() / num_pos
+            else:
+                loss_i = self.center_empty_scale * per_token.mean()
+            losses.append(loss_i)
+
+        return torch.stack(losses).mean() * self.center_loss_weight
+
     def forward(
         self,
         preds: tuple[torch.Tensor, torch.Tensor],
@@ -404,6 +513,9 @@ class RTDETRDetectionLoss(DETRLoss):
         dn_bboxes: torch.Tensor | None = None,
         dn_scores: torch.Tensor | None = None,
         dn_meta: dict[str, Any] | None = None,
+        center_logits: torch.Tensor | None = None,
+        center_points: torch.Tensor | None = None,
+        center_valid_mask: torch.Tensor | None = None,
     ) -> dict[str, torch.Tensor]:
         """Forward pass to compute detection loss with optional denoising loss.
 
@@ -413,6 +525,9 @@ class RTDETRDetectionLoss(DETRLoss):
             dn_bboxes (torch.Tensor, optional): Denoising bounding boxes.
             dn_scores (torch.Tensor, optional): Denoising scores.
             dn_meta (dict[str, Any], optional): Metadata for denoising.
+            center_logits (torch.Tensor, optional): Center logits over encoder tokens with shape (B, N).
+            center_points (torch.Tensor, optional): Encoder token centers with shape (N, 2).
+            center_valid_mask (torch.Tensor, optional): Valid mask over encoder tokens with shape (N,) or (1, N, 1).
 
         Returns:
             (dict[str, torch.Tensor]): Dictionary containing total loss and denoising loss if applicable.
@@ -434,6 +549,22 @@ class RTDETRDetectionLoss(DETRLoss):
         else:
             # If no denoising metadata is provided, set denoising loss to zero
             total_loss.update({f"{k}_dn": torch.tensor(0.0, device=self.device) for k in total_loss.keys()})
+
+        center_loss = torch.tensor(0.0, device=self.device)
+        if (
+            center_logits is not None
+            and center_points is not None
+            and self.center_loss_weight > 0
+            and self.center_target == "box_centerness"
+        ):
+            center_loss = self._get_center_loss(
+                center_logits=center_logits,
+                center_points=center_points.to(device=self.device, dtype=pred_bboxes.dtype),
+                center_valid_mask=center_valid_mask,
+                gt_bboxes=batch["bboxes"].to(device=self.device, dtype=pred_bboxes.dtype),
+                gt_groups=batch["gt_groups"],
+            )
+        total_loss["loss_center"] = center_loss
 
         return total_loss
 
