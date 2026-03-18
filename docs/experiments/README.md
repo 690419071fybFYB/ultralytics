@@ -13,15 +13,16 @@
 | Phase | Topic | Status | Start Date | End Date | Notes |
 |---|---|---|---|---|---|
 | Phase 1 | Center-aware Query Reranking | Pass | 2026-03-13 | 2026-03-15 | λ 扫描完成，门槛通过 |
-| Phase 2 | Per-level Query Quota | Running | 2026-03-16 | - | 当前在跑 `phase2_quota_none_lam035_seed0_e40` |
-| Phase 3 | Reference Point Bias (planned) | Planned | - | - | 仅在 Phase 2 通过后启动 |
+| Phase 2 | Per-level Query Quota | Fail | 2026-03-16 | 2026-03-17 | 未观察到稳定增益，主线不继续 |
+| Phase 3 | Reference Point Bias (xy) | Code Ready | 2026-03-17 | - | 已完成代码实现，待 seed=0 快筛 |
 
 ## Phase Summary Table
 
 | Phase | Goal | Core Change | Best Result | Gate Decision | Detail |
 |---|---|---|---|---|---|
 | Phase 1 | 验证 `center_lambda_max` 是否提升中心先验重排效果 | `S_fuse = z(cls) + λ*z(center)` | test mAP50-95: `0.553459` (`λ=0.35`) | Pass | [phase1_center_rerank.md](./phase1_center_rerank.md) |
-| Phase 2 | 验证固定配额的多尺度 query 选择是否进一步提升 | `query_quota_mode=fixed` + `query_level_ratios` | 进行中（首个对照 run 已到 epoch 6） | Pending | [phase2_quota.md](./phase2_quota.md) |
+| Phase 2 | 验证固定配额的多尺度 query 选择是否进一步提升 | `query_quota_mode=fixed` + `query_level_ratios` | 无稳定增益 | Fail | [phase2_quota.md](./phase2_quota.md) |
+| Phase 3 | 验证参考点中心偏置是否提升收敛与最终精度 | `reference_point_bias_mode=xy` + `loss_ref_bias` | 待运行 | Pending | [phase3_ref_point_bias.md](./phase3_ref_point_bias.md) |
 
 ## Repro Commands
 
@@ -64,6 +65,7 @@ pgrep -af "phase2_quota"
 ## Links
 - Phase 1 Detail: [phase1_center_rerank.md](./phase1_center_rerank.md)
 - Phase 2 Detail: [phase2_quota.md](./phase2_quota.md)
+- Phase 3 Detail: [phase3_ref_point_bias.md](./phase3_ref_point_bias.md)
 - Generic Phase Template: [templates/phase_template.md](./templates/phase_template.md)
 - Experiment Entry Template: [templates/experiment_entry_template.md](./templates/experiment_entry_template.md)
 - Phase 1 sweep CSV: [`runs/analysis/phase1_lambda_sweep_seed0/sweep_train_summary.csv`](../../runs/analysis/phase1_lambda_sweep_seed0/sweep_train_summary.csv)

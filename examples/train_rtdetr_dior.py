@@ -21,6 +21,18 @@ def resolve_data_yaml(data: str) -> str:
     return data
 
 
+def parse_bool(value: str | bool) -> bool:
+    """Parse bool CLI arguments like true/false/1/0."""
+    if isinstance(value, bool):
+        return value
+    value = str(value).strip().lower()
+    if value in {"1", "true", "t", "yes", "y", "on"}:
+        return True
+    if value in {"0", "false", "f", "no", "n", "off"}:
+        return False
+    raise argparse.ArgumentTypeError(f"Invalid boolean value: {value}")
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train RT-DETR on DIOR dataset.")
     parser.add_argument("--model", type=str, default="rtdetr-l.pt", help="RT-DETR model path or name.")
@@ -87,6 +99,37 @@ def parse_args() -> argparse.Namespace:
         default=0,
         help="Minimum selected queries per feature level in fixed quota mode.",
     )
+    parser.add_argument(
+        "--reference-point-bias-mode",
+        type=str,
+        default="none",
+        choices=("none", "xy"),
+        help="Reference point bias mode.",
+    )
+    parser.add_argument(
+        "--reference-point-bias-max-shift",
+        type=float,
+        default=0.06,
+        help="Max normalized xy shift for reference point bias.",
+    )
+    parser.add_argument(
+        "--reference-point-bias-warmup-epochs",
+        type=int,
+        default=10,
+        help="Epochs to warm up reference point bias shift.",
+    )
+    parser.add_argument(
+        "--reference-point-bias-use-center-gate",
+        type=parse_bool,
+        default=True,
+        help="Whether to gate reference point bias by center confidence.",
+    )
+    parser.add_argument(
+        "--reference-point-bias-gate-detach",
+        type=parse_bool,
+        default=True,
+        help="Whether to detach center gate gradients in reference point bias.",
+    )
     parser.add_argument("--center-loss-weight", type=float, default=0.5, help="Center loss weight.")
     parser.add_argument("--center-pos-alpha", type=float, default=4.0, help="Positive reweight alpha in center loss.")
     parser.add_argument("--center-empty-scale", type=float, default=0.25, help="Loss scale for images without GT.")
@@ -103,6 +146,18 @@ def parse_args() -> argparse.Namespace:
         default="max",
         choices=("max",),
         help="Multi-GT assignment rule for center target.",
+    )
+    parser.add_argument(
+        "--reference-point-bias-loss-weight",
+        type=float,
+        default=0.2,
+        help="Reference point bias supervision loss weight.",
+    )
+    parser.add_argument(
+        "--reference-point-bias-empty-scale",
+        type=float,
+        default=0.0,
+        help="Reference point bias loss scale for images without positive queries.",
     )
     parser.add_argument("--exist-ok", action="store_true", help="Allow existing project/name directory.")
     parser.add_argument("--resume", action="store_true", help="Resume from latest checkpoint.")
@@ -133,11 +188,18 @@ def main() -> None:
         query_quota_mode=args.query_quota_mode,
         query_level_ratios=args.query_level_ratios,
         query_quota_min_per_level=args.query_quota_min_per_level,
+        reference_point_bias_mode=args.reference_point_bias_mode,
+        reference_point_bias_max_shift=args.reference_point_bias_max_shift,
+        reference_point_bias_warmup_epochs=args.reference_point_bias_warmup_epochs,
+        reference_point_bias_use_center_gate=args.reference_point_bias_use_center_gate,
+        reference_point_bias_gate_detach=args.reference_point_bias_gate_detach,
         center_loss_weight=args.center_loss_weight,
         center_pos_alpha=args.center_pos_alpha,
         center_empty_scale=args.center_empty_scale,
         center_target=args.center_target,
         center_multi_gt_rule=args.center_multi_gt_rule,
+        reference_point_bias_loss_weight=args.reference_point_bias_loss_weight,
+        reference_point_bias_empty_scale=args.reference_point_bias_empty_scale,
         exist_ok=args.exist_ok,
         resume=args.resume,
     )

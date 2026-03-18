@@ -780,8 +780,25 @@ class RTDETRDetectionModel(DetectionModel):
         head.query_quota_min_per_level = get(
             "query_quota_min_per_level", getattr(head, "query_quota_min_per_level", 0)
         )
+        head.reference_point_bias_mode = get(
+            "reference_point_bias_mode", getattr(head, "reference_point_bias_mode", "none")
+        )
+        head.reference_point_bias_max_shift = get(
+            "reference_point_bias_max_shift", getattr(head, "reference_point_bias_max_shift", 0.06)
+        )
+        head.reference_point_bias_warmup_epochs = get(
+            "reference_point_bias_warmup_epochs", getattr(head, "reference_point_bias_warmup_epochs", 10)
+        )
+        head.reference_point_bias_use_center_gate = get(
+            "reference_point_bias_use_center_gate", getattr(head, "reference_point_bias_use_center_gate", True)
+        )
+        head.reference_point_bias_gate_detach = get(
+            "reference_point_bias_gate_detach", getattr(head, "reference_point_bias_gate_detach", True)
+        )
         if not hasattr(head, "enc_center_head"):
             head.enc_center_head = torch.nn.Linear(head.hidden_dim, 1).to(head.enc_score_head.weight.device)
+        if not hasattr(head, "enc_ref_bias_head"):
+            head.enc_ref_bias_head = torch.nn.Linear(head.hidden_dim, 2).to(head.enc_score_head.weight.device)
 
     def init_criterion(self):
         """Initialize the loss criterion for the RTDETRDetectionModel."""
@@ -797,6 +814,8 @@ class RTDETRDetectionModel(DetectionModel):
             center_empty_scale=arg("center_empty_scale", 0.25),
             center_target=arg("center_target", "box_centerness"),
             center_multi_gt_rule=arg("center_multi_gt_rule", "max"),
+            reference_point_bias_loss_weight=arg("reference_point_bias_loss_weight", 0.2),
+            reference_point_bias_empty_scale=arg("reference_point_bias_empty_scale", 0.0),
         )
 
     def loss(self, batch, preds=None):
@@ -836,6 +855,9 @@ class RTDETRDetectionModel(DetectionModel):
         center_logits = raw[5] if len(raw) > 5 else None
         center_points = raw[6] if len(raw) > 6 else None
         center_valid_mask = raw[7] if len(raw) > 7 else None
+        selected_query_points = raw[8] if len(raw) > 8 else None
+        biased_query_xy = raw[9] if len(raw) > 9 else None
+        selected_query_valid_mask = raw[10] if len(raw) > 10 else None
         if dn_meta is None:
             dn_bboxes, dn_scores = None, None
         else:
@@ -854,6 +876,9 @@ class RTDETRDetectionModel(DetectionModel):
             center_logits=center_logits,
             center_points=center_points,
             center_valid_mask=center_valid_mask,
+            selected_query_points=selected_query_points,
+            biased_query_xy=biased_query_xy,
+            selected_query_valid_mask=selected_query_valid_mask,
         )
         # NOTE: There are like 12 losses in RTDETR, backward with all losses but only show the main three losses.
         return sum(loss.values()), torch.as_tensor(

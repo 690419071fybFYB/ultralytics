@@ -405,6 +405,8 @@ class RTDETRDetectionLoss(DETRLoss):
         center_empty_scale: float = 0.25,
         center_target: str = "box_centerness",
         center_multi_gt_rule: str = "max",
+        reference_point_bias_loss_weight: float = 0.2,
+        reference_point_bias_empty_scale: float = 0.0,
         **kwargs,
     ):
         """Initialize RT-DETR detection loss with optional center-aware query reranking supervision."""
@@ -414,6 +416,8 @@ class RTDETRDetectionLoss(DETRLoss):
         self.center_empty_scale = center_empty_scale
         self.center_target = center_target
         self.center_multi_gt_rule = center_multi_gt_rule
+        self.reference_point_bias_loss_weight = reference_point_bias_loss_weight
+        self.reference_point_bias_empty_scale = reference_point_bias_empty_scale
 
     def _build_box_centerness_targets(
         self, center_points: torch.Tensor, gt_bboxes: torch.Tensor, gt_groups: list[int], eps: float = 1e-6
@@ -508,6 +512,90 @@ class RTDETRDetectionLoss(DETRLoss):
 
         return torch.stack(losses).mean() * self.center_loss_weight
 
+    def _assign_query_center_targets(
+        self, query_points: torch.Tensor, gt_bboxes: torch.Tensor, gt_groups: list[int], eps: float = 1e-6
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Assign each query point to a GT center with max centerness weight."""
+        bs, nq = query_points.shape[:2]
+        target_xy = query_points.new_zeros((bs, nq, 2))
+        target_weight = query_points.new_zeros((bs, nq))
+        if sum(gt_groups) == 0:
+            return target_xy, target_weight
+
+        offset = 0
+        for bi, num_gt in enumerate(gt_groups):
+            if num_gt == 0:
+                continue
+
+            boxes = gt_bboxes[offset : offset + num_gt]  # xywh in [0,1]
+            offset += num_gt
+
+            x, y, w, h = boxes.unbind(-1)
+            x1 = (x - w * 0.5).unsqueeze(0)
+            y1 = (y - h * 0.5).unsqueeze(0)
+            x2 = (x + w * 0.5).unsqueeze(0)
+            y2 = (y + h * 0.5).unsqueeze(0)
+
+            px = query_points[bi, :, 0:1]
+            py = query_points[bi, :, 1:2]
+
+            l = px - x1
+            r = x2 - px
+            t = py - y1
+            b = y2 - py
+
+            inside = (l > 0) & (r > 0) & (t > 0) & (b > 0)
+            lr = torch.minimum(l, r) / (torch.maximum(l, r) + eps)
+            tb = torch.minimum(t, b) / (torch.maximum(t, b) + eps)
+            centerness = torch.sqrt((lr * tb).clamp_(0.0, 1.0)) * inside.float()
+
+            best_weight, best_idx = centerness.max(dim=1)
+            target_weight[bi] = best_weight
+            target_xy[bi] = boxes[best_idx, :2]
+
+        return target_xy, target_weight
+
+    def _get_reference_point_bias_loss(
+        self,
+        selected_query_points: torch.Tensor,
+        biased_query_xy: torch.Tensor,
+        selected_query_valid_mask: torch.Tensor | None,
+        gt_bboxes: torch.Tensor,
+        gt_groups: list[int],
+    ) -> torch.Tensor:
+        """Compute weighted L1 loss for biased query centers against assigned GT centers."""
+        target_xy, target_weight = self._assign_query_center_targets(selected_query_points, gt_bboxes, gt_groups)
+        target_xy = target_xy.to(device=biased_query_xy.device, dtype=biased_query_xy.dtype)
+        target_weight = target_weight.to(device=biased_query_xy.device, dtype=biased_query_xy.dtype)
+
+        valid = None
+        if selected_query_valid_mask is not None:
+            valid = selected_query_valid_mask.to(device=biased_query_xy.device, dtype=torch.bool)
+
+        losses = []
+        for bi in range(biased_query_xy.shape[0]):
+            pred = biased_query_xy[bi]
+            tgt = target_xy[bi]
+            w = target_weight[bi]
+            if valid is not None:
+                mask = valid[bi]
+                pred = pred[mask]
+                tgt = tgt[mask]
+                w = w[mask]
+            if pred.numel() == 0:
+                losses.append(biased_query_xy.new_zeros(()))
+                continue
+
+            per_query = F.l1_loss(pred, tgt, reduction="none").mean(-1)
+            pos = w > 0
+            if int(pos.sum().item()) > 0:
+                loss_i = (per_query[pos] * w[pos]).sum() / w[pos].sum().clamp_min(1e-6)
+            else:
+                loss_i = self.reference_point_bias_empty_scale * per_query.mean()
+            losses.append(loss_i)
+
+        return torch.stack(losses).mean() * self.reference_point_bias_loss_weight
+
     def forward(
         self,
         preds: tuple[torch.Tensor, torch.Tensor],
@@ -518,6 +606,9 @@ class RTDETRDetectionLoss(DETRLoss):
         center_logits: torch.Tensor | None = None,
         center_points: torch.Tensor | None = None,
         center_valid_mask: torch.Tensor | None = None,
+        selected_query_points: torch.Tensor | None = None,
+        biased_query_xy: torch.Tensor | None = None,
+        selected_query_valid_mask: torch.Tensor | None = None,
     ) -> dict[str, torch.Tensor]:
         """Forward pass to compute detection loss with optional denoising loss.
 
@@ -530,6 +621,9 @@ class RTDETRDetectionLoss(DETRLoss):
             center_logits (torch.Tensor, optional): Center logits over encoder tokens with shape (B, N).
             center_points (torch.Tensor, optional): Encoder token centers with shape (N, 2).
             center_valid_mask (torch.Tensor, optional): Valid mask over encoder tokens with shape (N,) or (1, N, 1).
+            selected_query_points (torch.Tensor, optional): Selected query anchor centers with shape (B, Q, 2).
+            biased_query_xy (torch.Tensor, optional): Biased query reference centers with shape (B, Q, 2).
+            selected_query_valid_mask (torch.Tensor, optional): Valid mask over selected queries with shape (B, Q).
 
         Returns:
             (dict[str, torch.Tensor]): Dictionary containing total loss and denoising loss if applicable.
@@ -567,6 +661,21 @@ class RTDETRDetectionLoss(DETRLoss):
                 gt_groups=batch["gt_groups"],
             )
         total_loss["loss_center"] = center_loss
+
+        ref_bias_loss = torch.tensor(0.0, device=self.device)
+        if (
+            selected_query_points is not None
+            and biased_query_xy is not None
+            and self.reference_point_bias_loss_weight > 0
+        ):
+            ref_bias_loss = self._get_reference_point_bias_loss(
+                selected_query_points=selected_query_points.to(device=self.device, dtype=pred_bboxes.dtype),
+                biased_query_xy=biased_query_xy.to(device=self.device, dtype=pred_bboxes.dtype),
+                selected_query_valid_mask=selected_query_valid_mask,
+                gt_bboxes=batch["bboxes"].to(device=self.device, dtype=pred_bboxes.dtype),
+                gt_groups=batch["gt_groups"],
+            )
+        total_loss["loss_ref_bias"] = ref_bias_loss
 
         return total_loss
 

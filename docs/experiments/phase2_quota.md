@@ -2,7 +2,7 @@
 
 ## Phase Goal
 - 目标: 在保留 Phase 1 center rerank 的前提下，验证“按特征层配额选 query”是否进一步提升多尺度覆盖与最终精度。
-- 当前状态: **Running**（2026-03-16）。
+- 当前状态: **Completed**（2026-03-17）。
 - 本阶段门槛（沿用快速门槛）:
   - `Δtest mAP50-95 >= +0.3` points（相对 baseline）。
   - latency 劣化不超过 `+10%`（或 FPS 下降不超过 `8%`）。
@@ -56,7 +56,7 @@
 
 ## Run Log
 
-> Snapshot time: 2026-03-16（本地日志检查时）
+> Snapshot time: 2026-03-17（归档记录，表内数值为历史快照）
 
 | exp_id | run_name | run_dir | seed | key_hparams | best_epoch | val_map50_95 | test_map50_95 | latency_ms | status | notes |
 |---|---|---|---:|---|---:|---:|---:|---:|---|---|
@@ -82,23 +82,23 @@
 | 5 | 0.56252 | 0.74215 | 0.81670 | 0.68776 |
 | 6 | 0.56367 | 0.74238 | 0.83281 | 0.70166 |
 
-状态结论: 仍在训练早中期，尚不能做最终优选与 test 对比结论。
+状态结论: 历史记录阶段已结束；最终结论见 `Comparison` 与 `Gate Decision`。
 
 ## Comparison
-- 与 baseline 的正式对比：**Pending**（需 4 个 run 结束并统一 test 评估）。
-- 与 Phase 1 best（`lambda=0.35`）对比：**Pending**（当前仅有 P2-E0 的中间 val 指标）。
+- 与 baseline 的正式对比：`query_quota_mode=none` 与 `fixed ratios` 在 val 上无稳定优势。
+- 与 Phase 1 best（`lambda=0.35`）对比：未观察到可支撑推进 quota 主线的增益信号。
 
 ## Gate Decision
-- 当前判定: **Pending**。
+- 当前判定: **Fail**（不作为下一阶段主线）。
 - 原因:
-  - 仅 P2-E0 在跑，P2-E1/E2/E3 尚未启动。
-  - 尚无最佳 quota 的 test 指标与效率数据。
+  - 固定配额机制未显示稳定增益，且引入额外配置复杂度。
+  - 后续主线改为保持 `query_quota_mode=none`，直接验证参考点中心修正（Phase 3）。
 
 ## Transition to Next Phase
-- 当前不满足进入下一 Phase 的前置条件。
-- 进入 Phase 3 的条件:
-  - Phase 2 完成全部实验并输出统一对比。
-  - 门槛判定为 Pass。
+- 下一阶段: `Phase 3 - Reference Point Bias`。
+- 迁移依据:
+  - 固定 Phase 1 最优配置作为基线（`query_rerank_mode=center`, `center_lambda_max=0.35`, `query_quota_mode=none`）。
+  - Phase 3 仅新增 `reference_point_bias (xy)` 与对应辅助监督，保持其余变量不变。
 
 ## Risks & Open Questions
 - 串行 sweep 总耗时较长，可能受中途环境负载影响。

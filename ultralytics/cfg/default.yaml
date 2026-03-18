@@ -47,6 +47,12 @@ center_score_clip: 6.0 # (float) optional clamp range for fused rerank score, <=
 query_quota_mode: none # (str) RT-DETR query quota mode: 'none' or 'fixed'
 query_level_ratios: "0.5,0.3,0.2" # (str) per-level query ratios when query_quota_mode='fixed'
 query_quota_min_per_level: 0 # (int) minimum selected queries per feature level in fixed quota mode
+# RT-DETR reference point bias (Phase 3)
+reference_point_bias_mode: none # (str) reference point bias mode: 'none' or 'xy'
+reference_point_bias_max_shift: 0.06 # (float) max normalized xy shift for reference point bias
+reference_point_bias_warmup_epochs: 10 # (int) warmup epochs to ramp reference point bias shift
+reference_point_bias_use_center_gate: True # (bool) gate reference point bias by center confidence
+reference_point_bias_gate_detach: True # (bool) detach center gate to isolate rerank gradients
 
 # Segmentation
 overlap_mask: True # (bool) merge instance masks into one mask during training (segment only)
@@ -140,6 +146,8 @@ center_pos_alpha: 4.0 # (float) positive reweighting alpha in center loss
 center_empty_scale: 0.25 # (float) scale for center loss on images without GT
 center_target: box_centerness # (str) center supervision target type
 center_multi_gt_rule: max # (str) multi-GT assignment rule for center target
+reference_point_bias_loss_weight: 0.2 # (float) loss gain for reference point bias supervision
+reference_point_bias_empty_scale: 0.0 # (float) loss scale when no positive query is assigned in an image
 
 # Custom config.yaml ---------------------------------------------------------------------------------------------------
 cfg: # (str, optional) path to a config.yaml that overrides defaults

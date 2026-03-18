@@ -1476,6 +1476,11 @@ class RTDETRDecoder(nn.Module):
         query_quota_mode: str = "none",
         query_level_ratios: str | list[float] | tuple[float, ...] = "",
         query_quota_min_per_level: int = 0,
+        reference_point_bias_mode: str = "none",
+        reference_point_bias_max_shift: float = 0.06,
+        reference_point_bias_warmup_epochs: int = 10,
+        reference_point_bias_use_center_gate: bool = True,
+        reference_point_bias_gate_detach: bool = True,
     ):
         """Initialize the RTDETRDecoder module with the given parameters.
 
@@ -1503,6 +1508,11 @@ class RTDETRDecoder(nn.Module):
             query_quota_mode (str): Query selection quota mode, either 'none' or 'fixed'.
             query_level_ratios (str | list[float] | tuple[float, ...]): Per-level query ratios for fixed quota mode.
             query_quota_min_per_level (int): Minimum number of selected queries per feature level.
+            reference_point_bias_mode (str): Reference point bias mode, either 'none' or 'xy'.
+            reference_point_bias_max_shift (float): Max normalized xy shift applied to reference points.
+            reference_point_bias_warmup_epochs (int): Epochs to warm up reference point bias shift.
+            reference_point_bias_use_center_gate (bool): Whether to gate xy shift by center confidence.
+            reference_point_bias_gate_detach (bool): Whether to detach center gate to isolate rerank gradients.
         """
         super().__init__()
         self.hidden_dim = hd
@@ -1519,6 +1529,11 @@ class RTDETRDecoder(nn.Module):
         self.query_quota_mode = query_quota_mode
         self.query_level_ratios = query_level_ratios
         self.query_quota_min_per_level = query_quota_min_per_level
+        self.reference_point_bias_mode = reference_point_bias_mode
+        self.reference_point_bias_max_shift = reference_point_bias_max_shift
+        self.reference_point_bias_warmup_epochs = reference_point_bias_warmup_epochs
+        self.reference_point_bias_use_center_gate = reference_point_bias_use_center_gate
+        self.reference_point_bias_gate_detach = reference_point_bias_gate_detach
 
         # Backbone feature projection
         self.input_proj = nn.ModuleList(nn.Sequential(nn.Conv2d(x, hd, 1, bias=False), nn.BatchNorm2d(hd)) for x in ch)
@@ -1545,6 +1560,7 @@ class RTDETRDecoder(nn.Module):
         self.enc_output = nn.Sequential(nn.Linear(hd, hd), nn.LayerNorm(hd))
         self.enc_score_head = nn.Linear(hd, nc)
         self.enc_center_head = nn.Linear(hd, 1)
+        self.enc_ref_bias_head = nn.Linear(hd, 2)
         self.enc_bbox_head = MLP(hd, hd, 4, num_layers=3)
 
         # Decoder head
@@ -1582,7 +1598,18 @@ class RTDETRDecoder(nn.Module):
             self.training,
         )
 
-        embed, refer_bbox, enc_bboxes, enc_scores, enc_center_logits, center_points, center_valid_mask = (
+        (
+            embed,
+            refer_bbox,
+            enc_bboxes,
+            enc_scores,
+            enc_center_logits,
+            center_points,
+            center_valid_mask,
+            selected_query_points,
+            biased_query_xy,
+            selected_query_valid_mask,
+        ) = (
             self._get_decoder_input(feats, shapes, dn_embed, dn_bbox, batch=batch)
         )
 
@@ -1597,7 +1624,19 @@ class RTDETRDecoder(nn.Module):
             self.query_pos_head,
             attn_mask=attn_mask,
         )
-        x = dec_bboxes, dec_scores, enc_bboxes, enc_scores, dn_meta, enc_center_logits, center_points, center_valid_mask
+        x = (
+            dec_bboxes,
+            dec_scores,
+            enc_bboxes,
+            enc_scores,
+            dn_meta,
+            enc_center_logits,
+            center_points,
+            center_valid_mask,
+            selected_query_points,
+            biased_query_xy,
+            selected_query_valid_mask,
+        )
         if self.training:
             return x
         # (bs, 300, 4+nc)
@@ -1676,7 +1715,18 @@ class RTDETRDecoder(nn.Module):
         dn_embed: torch.Tensor | None = None,
         dn_bbox: torch.Tensor | None = None,
         batch: dict | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None, torch.Tensor, torch.Tensor]:
+    ) -> tuple[
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor | None,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+    ]:
         """Generate and prepare the input required for the decoder from the provided features and shapes.
 
         Args:
@@ -1693,6 +1743,9 @@ class RTDETRDecoder(nn.Module):
             enc_center_logits (torch.Tensor | None): Center logits over all encoder tokens.
             center_points (torch.Tensor): Encoder token center coordinates in normalized xy, shape (N, 2).
             center_valid_mask (torch.Tensor): Encoder token valid mask, shape (N,).
+            selected_query_points (torch.Tensor): Selected query anchor centers in normalized xy, shape (B, Q, 2).
+            biased_query_xy (torch.Tensor): Selected query reference centers after bias, shape (B, Q, 2).
+            selected_query_valid_mask (torch.Tensor): Valid mask over selected queries, shape (B, Q).
         """
         bs = feats.shape[0]
         if self.dynamic or self.shapes != shapes:
@@ -1714,10 +1767,18 @@ class RTDETRDecoder(nn.Module):
         # Prepare query ranking scores
         cls_scores = enc_outputs_scores.max(-1).values
         query_rerank_mode = str(getattr(self, "query_rerank_mode", "none")).lower()
-        if query_rerank_mode == "center":
+        reference_point_bias_mode = str(getattr(self, "reference_point_bias_mode", "none")).lower()
+        use_center_gate = bool(getattr(self, "reference_point_bias_use_center_gate", True))
+        need_center_logits = query_rerank_mode == "center" or (reference_point_bias_mode == "xy" and use_center_gate)
+        enc_outputs_center = None
+        if need_center_logits:
             if hasattr(self, "enc_center_head"):
                 enc_outputs_center = self.enc_center_head(features).squeeze(-1)  # (bs, h*w)
             else:
+                enc_outputs_center = torch.zeros_like(cls_scores)
+
+        if query_rerank_mode == "center":
+            if enc_outputs_center is None:
                 enc_outputs_center = torch.zeros_like(cls_scores)
             center_score_norm = str(getattr(self, "center_score_norm", "zscore_image")).lower()
             if center_score_norm == "zscore_image":
@@ -1739,8 +1800,9 @@ class RTDETRDecoder(nn.Module):
         # Query selection
         # (bs, num_queries)
         topk_ind = self._select_query_indices(query_scores, shapes, self.valid_mask)
+        topk_ind_2d = topk_ind
         # (bs*num_queries,)
-        topk_ind = topk_ind.view(-1)
+        topk_ind = topk_ind_2d.view(-1)
         # (bs*num_queries,)
         batch_ind = torch.arange(end=bs, dtype=topk_ind.dtype).unsqueeze(-1).repeat(1, self.num_queries).view(-1)
 
@@ -1748,9 +1810,29 @@ class RTDETRDecoder(nn.Module):
         top_k_features = features[batch_ind, topk_ind].view(bs, self.num_queries, -1)
         # (bs, num_queries, 4)
         top_k_anchors = self.anchors[:, topk_ind].view(bs, self.num_queries, -1)
+        selected_query_points = top_k_anchors[..., :2].sigmoid()
+
+        valid_flat = self.valid_mask.squeeze(0).squeeze(-1)
+        selected_query_valid_mask = valid_flat[topk_ind].view(bs, self.num_queries).to(dtype=torch.bool)
+
+        selected_center_logits = None
+        if enc_outputs_center is not None:
+            selected_center_logits = enc_outputs_center[batch_ind, topk_ind].view(bs, self.num_queries)
 
         # Dynamic anchors + static content
         refer_bbox = self.enc_bbox_head(top_k_features) + top_k_anchors
+        biased_query_xy = refer_bbox[..., :2].sigmoid()
+
+        if reference_point_bias_mode == "xy":
+            bias_delta = torch.tanh(self.enc_ref_bias_head(top_k_features))
+            bias_scale = self._reference_point_bias_scale(batch)
+            gate = torch.ones_like(bias_delta[..., :1])
+            if use_center_gate and selected_center_logits is not None:
+                gate = selected_center_logits.sigmoid().unsqueeze(-1)
+                if bool(getattr(self, "reference_point_bias_gate_detach", True)):
+                    gate = gate.detach()
+            biased_query_xy = (biased_query_xy + bias_scale * gate * bias_delta).clamp(1e-4, 1.0 - 1e-4)
+            refer_bbox = torch.cat((torch.logit(biased_query_xy), refer_bbox[..., 2:]), dim=-1)
 
         enc_bboxes = refer_bbox.sigmoid()
         if dn_bbox is not None:
@@ -1767,7 +1849,18 @@ class RTDETRDecoder(nn.Module):
 
         center_points = self.anchors[..., :2].sigmoid().squeeze(0)
         center_valid_mask = self.valid_mask.squeeze(0).squeeze(-1)
-        return embeddings, refer_bbox, enc_bboxes, enc_scores, center_logits, center_points, center_valid_mask
+        return (
+            embeddings,
+            refer_bbox,
+            enc_bboxes,
+            enc_scores,
+            center_logits,
+            center_points,
+            center_valid_mask,
+            selected_query_points,
+            biased_query_xy,
+            selected_query_valid_mask,
+        )
 
     @staticmethod
     def _zscore_image(scores: torch.Tensor, eps: float = 1e-6, var_eps: float = 1e-8) -> torch.Tensor:
@@ -1791,6 +1884,25 @@ class RTDETRDecoder(nn.Module):
         epoch = float(batch["epoch"])
         ratio = min(max(epoch / warmup_epochs, 0.0), 1.0)
         return lam * ratio
+
+    def _reference_point_bias_scale(self, batch: dict | None) -> float:
+        """Return reference-point xy shift scale with training warmup."""
+        mode = str(getattr(self, "reference_point_bias_mode", "none")).lower()
+        if mode != "xy":
+            return 0.0
+
+        scale = max(float(getattr(self, "reference_point_bias_max_shift", 0.06)), 0.0)
+        if not self.training:
+            return scale
+
+        warmup_epochs = max(float(getattr(self, "reference_point_bias_warmup_epochs", 10)), 0.0)
+        if warmup_epochs == 0.0:
+            return scale
+        if batch is None or "epoch" not in batch:
+            return scale
+        epoch = float(batch["epoch"])
+        ratio = min(max(epoch / warmup_epochs, 0.0), 1.0)
+        return scale * ratio
 
     def _parse_level_ratios(self, nl: int) -> list[float] | None:
         """Parse and normalize per-level ratios for fixed query quota mode."""
@@ -1978,6 +2090,9 @@ class RTDETRDecoder(nn.Module):
         constant_(self.enc_score_head.bias, bias_cls)
         if hasattr(self, "enc_center_head"):
             constant_(self.enc_center_head.bias, 0.0)
+        if hasattr(self, "enc_ref_bias_head"):
+            constant_(self.enc_ref_bias_head.weight, 0.0)
+            constant_(self.enc_ref_bias_head.bias, 0.0)
         constant_(self.enc_bbox_head.layers[-1].weight, 0.0)
         constant_(self.enc_bbox_head.layers[-1].bias, 0.0)
         for cls_, reg_ in zip(self.dec_score_head, self.dec_bbox_head):
