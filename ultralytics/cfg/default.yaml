@@ -44,6 +44,9 @@ center_lambda_max: 0.25 # (float) max lambda for center-aware reranking
 center_lambda_warmup_epochs: 10 # (int) warmup epochs to ramp lambda from 0 to max
 center_score_norm: zscore_image # (str) score normalization mode for reranking, e.g. 'zscore_image'
 center_score_clip: 6.0 # (float) optional clamp range for fused rerank score, <=0 disables clip
+# RT-DETR history-aware decoder (lightweight experiment)
+use_history_fusion: True # (bool) fuse query history before each RT-DETR decoder layer
+history_window: 3 # (int) number of recent history states for fusion, <=0 uses all
 
 # Segmentation
 overlap_mask: True # (bool) merge instance masks into one mask during training (segment only)

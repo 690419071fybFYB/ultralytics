@@ -775,6 +775,16 @@ class RTDETRDetectionModel(DetectionModel):
         )
         head.center_score_norm = get("center_score_norm", getattr(head, "center_score_norm", "zscore_image"))
         head.center_score_clip = get("center_score_clip", getattr(head, "center_score_clip", 6.0))
+        head.use_history_fusion = bool(get("use_history_fusion", getattr(head, "use_history_fusion", True)))
+        head.history_window = get("history_window", getattr(head, "history_window", 3))
+        if hasattr(head, "decoder"):
+            head.decoder.use_history_fusion = head.use_history_fusion
+            history_window = head.history_window
+            head.decoder.history_window = (
+                int(history_window)
+                if isinstance(history_window, int) and history_window > 0
+                else None
+            )
         if not hasattr(head, "enc_center_head"):
             head.enc_center_head = torch.nn.Linear(head.hidden_dim, 1).to(head.enc_score_head.weight.device)
 

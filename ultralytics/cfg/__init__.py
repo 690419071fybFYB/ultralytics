@@ -208,6 +208,7 @@ CFG_INT_KEYS = frozenset(
         "nbs",
         "save_period",
         "center_lambda_warmup_epochs",
+        "history_window",
     }
 )
 CFG_BOOL_KEYS = frozenset(
@@ -245,6 +246,7 @@ CFG_BOOL_KEYS = frozenset(
         "nms",
         "profile",
         "end2end",
+        "use_history_fusion",
     }
 )
 

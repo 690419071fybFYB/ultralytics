@@ -20,6 +20,7 @@ __all__ = (
     "MLP",
     "DeformableTransformerDecoder",
     "DeformableTransformerDecoderLayer",
+    "HistoryFusion",
     "LayerNorm2d",
     "MLPBlock",
     "MSDeformAttn",
@@ -705,6 +706,38 @@ class DeformableTransformerDecoderLayer(nn.Module):
         return self.forward_ffn(embed)
 
 
+class HistoryFusion(nn.Module):
+    """Lightweight layer-wise fusion of decoder query history states."""
+
+    def __init__(self, max_history: int):
+        """Initialize a learnable history-weight vector for one decoder layer."""
+        super().__init__()
+        if max_history <= 0:
+            raise ValueError(f"max_history must be positive, got {max_history}.")
+        self.max_history = max_history
+        self.logits = nn.Parameter(torch.zeros(max_history))
+
+    def forward(
+        self, history_states: list[torch.Tensor], history_window: int | None = None
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Fuse history states with softmax-normalized, layer-shared weights."""
+        n = len(history_states)
+        if n == 0:
+            raise ValueError("history_states must contain at least one tensor.")
+        if n > self.max_history:
+            raise ValueError(f"history_states length {n} exceeds max_history {self.max_history}.")
+
+        start = 0
+        if history_window is not None and history_window > 0 and n > history_window:
+            start = n - history_window
+
+        used_states = history_states[start:n]
+        alpha = torch.softmax(self.logits[start:n], dim=0)
+        stacked = torch.stack(used_states, dim=0)  # (K, B, Q, C)
+        fused = (stacked * alpha.view(-1, 1, 1, 1)).sum(dim=0)
+        return fused, alpha
+
+
 class DeformableTransformerDecoder(nn.Module):
     """Deformable Transformer Decoder based on PaddleDetection implementation.
 
@@ -721,7 +754,15 @@ class DeformableTransformerDecoder(nn.Module):
         https://github.com/PaddlePaddle/PaddleDetection/blob/develop/ppdet/modeling/transformers/deformable_transformer.py
     """
 
-    def __init__(self, hidden_dim: int, decoder_layer: nn.Module, num_layers: int, eval_idx: int = -1):
+    def __init__(
+        self,
+        hidden_dim: int,
+        decoder_layer: nn.Module,
+        num_layers: int,
+        eval_idx: int = -1,
+        use_history_fusion: bool = True,
+        history_window: int | None = 3,
+    ):
         """Initialize the DeformableTransformerDecoder with the given parameters.
 
         Args:
@@ -729,12 +770,18 @@ class DeformableTransformerDecoder(nn.Module):
             decoder_layer (nn.Module): Decoder layer module.
             num_layers (int): Number of decoder layers.
             eval_idx (int): Index of the layer to use during evaluation.
+            use_history_fusion (bool): Whether to fuse history query states before each decoder layer.
+            history_window (int | None): Number of most-recent history states to fuse. Use all if None or <=0.
         """
         super().__init__()
         self.layers = _get_clones(decoder_layer, num_layers)
+        self.history_fusions = nn.ModuleList(HistoryFusion(i + 1) for i in range(num_layers))
         self.num_layers = num_layers
         self.hidden_dim = hidden_dim
         self.eval_idx = eval_idx if eval_idx >= 0 else num_layers + eval_idx
+        self.use_history_fusion = use_history_fusion
+        self.history_window = history_window if history_window is not None and history_window > 0 else None
+        self.last_history_alphas: list[torch.Tensor] = []
 
     def forward(
         self,
@@ -765,13 +812,32 @@ class DeformableTransformerDecoder(nn.Module):
             dec_bboxes (torch.Tensor): Decoded bounding boxes.
             dec_cls (torch.Tensor): Decoded classification scores.
         """
+        use_history_fusion = bool(getattr(self, "use_history_fusion", False))
+        history_window = getattr(self, "history_window", None)
+        history_window = history_window if isinstance(history_window, int) and history_window > 0 else None
+        if not hasattr(self, "last_history_alphas"):
+            self.last_history_alphas = []
+        if use_history_fusion and (
+            not hasattr(self, "history_fusions") or len(getattr(self, "history_fusions", [])) != self.num_layers
+        ):
+            # Backward-compatibility: lazily create fusion weights for old checkpoints without this module.
+            self.history_fusions = nn.ModuleList(HistoryFusion(i + 1) for i in range(self.num_layers))
+
         output = embed
+        history_states = [output]
         dec_bboxes = []
         dec_cls = []
         last_refined_bbox = None
         refer_bbox = refer_bbox.sigmoid()
+        self.last_history_alphas = []
         for i, layer in enumerate(self.layers):
-            output = layer(output, refer_bbox, feats, shapes, padding_mask, attn_mask, pos_mlp(refer_bbox))
+            if use_history_fusion:
+                layer_input, alpha = self.history_fusions[i](history_states, history_window)
+                self.last_history_alphas.append(alpha.detach())
+            else:
+                layer_input = output
+            output = layer(layer_input, refer_bbox, feats, shapes, padding_mask, attn_mask, pos_mlp(refer_bbox))
+            history_states.append(output)
 
             bbox = bbox_head[i](output)
             refined_bbox = torch.sigmoid(bbox + inverse_sigmoid(refer_bbox))

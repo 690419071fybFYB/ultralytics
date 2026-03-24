@@ -1458,7 +1458,7 @@ class RTDETRDecoder(nn.Module):
         nq: int = 300,  # num queries
         ndp: int = 4,  # num decoder points
         nh: int = 8,  # num head
-        ndl: int = 6,  # num decoder layers
+        ndl: int = 4,  # num decoder layers
         d_ffn: int = 1024,  # dim of feedforward
         dropout: float = 0.0,
         act: nn.Module = nn.ReLU(),
@@ -1473,6 +1473,8 @@ class RTDETRDecoder(nn.Module):
         center_lambda_warmup_epochs: int = 10,
         center_score_norm: str = "zscore_image",
         center_score_clip: float = 6.0,
+        use_history_fusion: bool = True,
+        history_window: int | None = 3,
     ):
         """Initialize the RTDETRDecoder module with the given parameters.
 
@@ -1497,6 +1499,8 @@ class RTDETRDecoder(nn.Module):
             center_lambda_warmup_epochs (int): Epochs to warm up lambda from 0 to max.
             center_score_norm (str): Center score normalization mode, e.g. 'zscore_image'.
             center_score_clip (float): Optional clip value for fused rerank score.
+            use_history_fusion (bool): Enable history-aware fusion before each decoder layer.
+            history_window (int | None): Number of most-recent history states to fuse, use all if None or <=0.
         """
         super().__init__()
         self.hidden_dim = hd
@@ -1510,6 +1514,8 @@ class RTDETRDecoder(nn.Module):
         self.center_lambda_warmup_epochs = center_lambda_warmup_epochs
         self.center_score_norm = center_score_norm
         self.center_score_clip = center_score_clip
+        self.use_history_fusion = use_history_fusion
+        self.history_window = history_window
 
         # Backbone feature projection
         self.input_proj = nn.ModuleList(nn.Sequential(nn.Conv2d(x, hd, 1, bias=False), nn.BatchNorm2d(hd)) for x in ch)
@@ -1518,7 +1524,14 @@ class RTDETRDecoder(nn.Module):
 
         # Transformer module
         decoder_layer = DeformableTransformerDecoderLayer(hd, nh, d_ffn, dropout, act, self.nl, ndp)
-        self.decoder = DeformableTransformerDecoder(hd, decoder_layer, ndl, eval_idx)
+        self.decoder = DeformableTransformerDecoder(
+            hd,
+            decoder_layer,
+            ndl,
+            eval_idx,
+            use_history_fusion=use_history_fusion,
+            history_window=history_window,
+        )
 
         # Denoising part
         self.denoising_class_embed = nn.Embedding(nc, hd)
