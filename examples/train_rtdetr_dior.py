@@ -48,7 +48,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--query-rerank-mode",
         type=str,
-        default="none",
+        default="center",
         choices=("none", "center"),
         help="RT-DETR query rerank mode.",
     )

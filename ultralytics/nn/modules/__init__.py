@@ -93,6 +93,8 @@ from .head import (
     YOLOESegment26,
     v10Detect,
 )
+from .rtdetr_center_decoder import CenterRTDETRDecoder
+from .rtdetr_aifi_experimental import SparseGatedAIFI
 from .transformer import (
     AIFI,
     MLP,
@@ -169,6 +171,8 @@ __all__ = (
     "Pose26",
     "Proto",
     "RTDETRDecoder",
+    "CenterRTDETRDecoder",
+    "SparseGatedAIFI",
     "RepC3",
     "RepConv",
     "RepNCSPELAN4",

@@ -7,6 +7,7 @@ from copy import copy
 import torch.nn as nn
 
 from ultralytics.models.yolo.detect import DetectionTrainer
+from ultralytics.nn.modules import CenterRTDETRDecoder
 from ultralytics.nn.tasks import RTDETRDetectionModel
 from ultralytics.utils import RANK, colorstr
 
@@ -63,6 +64,8 @@ class RTDETRTrainer(DetectionTrainer):
         """Set model and RT-DETR-head attributes from dataset and train args."""
         super().set_model_attributes()
         head = self.model.model[-1]
+        if not isinstance(head, CenterRTDETRDecoder):
+            return
         # Force-set for backward compatibility with old checkpoints that may not contain new attrs.
         head.query_rerank_mode = self.args.query_rerank_mode
         head.center_lambda_max = self.args.center_lambda_max

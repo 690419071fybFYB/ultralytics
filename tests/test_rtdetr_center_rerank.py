@@ -4,6 +4,8 @@ import pytest
 import torch
 
 from ultralytics.models.utils.loss import RTDETRDetectionLoss
+from ultralytics.nn.tasks import RTDETRDetectionModel
+from ultralytics.nn.modules import CenterRTDETRDecoder
 from ultralytics.nn.modules.head import RTDETRDecoder
 from ultralytics.utils.torch_utils import TORCH_1_11
 
@@ -12,12 +14,12 @@ from ultralytics.utils.torch_utils import TORCH_1_11
 def test_rtdetr_zscore_image():
     """Per-image z-score should be zero-mean, unit-variance and robust to constant inputs."""
     scores = torch.randn(3, 97)
-    z = RTDETRDecoder._zscore_image(scores)
+    z = CenterRTDETRDecoder._zscore_image(scores)
     assert torch.allclose(z.mean(dim=1), torch.zeros(3), atol=1e-5)
     assert torch.allclose(z.var(dim=1, unbiased=False), torch.ones(3), atol=1e-4)
 
     const = torch.full((2, 31), 5.0)
-    z_const = RTDETRDecoder._zscore_image(const)
+    z_const = CenterRTDETRDecoder._zscore_image(const)
     assert torch.equal(z_const, torch.zeros_like(const))
 
 
@@ -76,9 +78,9 @@ def test_rtdetr_decoder_center_rerank_forward_shapes():
     ]
 
     decoder_none = RTDETRDecoder(
-        nc=5, ch=(32, 32, 32), hd=32, nq=20, ndp=2, nh=4, ndl=1, d_ffn=64, nd=0, query_rerank_mode="none"
+        nc=5, ch=(32, 32, 32), hd=32, nq=20, ndp=2, nh=4, ndl=1, d_ffn=64, nd=0
     ).eval()
-    decoder_center = RTDETRDecoder(
+    decoder_center = CenterRTDETRDecoder(
         nc=5, ch=(32, 32, 32), hd=32, nq=20, ndp=2, nh=4, ndl=1, d_ffn=64, nd=0, query_rerank_mode="center"
     ).eval()
     decoder_center.load_state_dict(decoder_none.state_dict(), strict=False)
@@ -88,7 +90,8 @@ def test_rtdetr_decoder_center_rerank_forward_shapes():
         y_center, aux_center = decoder_center(x)
 
     assert y_none.shape == y_center.shape == (1, 20, 9)
-    assert len(aux_none) == 8 and len(aux_center) == 8
+    assert len(aux_none) == 5
+    assert len(aux_center) == 8
 
 
 @pytest.mark.skipif(not TORCH_1_11, reason="RTDETR requires torch>=1.11")
@@ -100,9 +103,9 @@ def test_rtdetr_decoder_none_matches_center_when_lambda_zero():
         torch.randn(1, 32, 2, 2),
     ]
     decoder_none = RTDETRDecoder(
-        nc=5, ch=(32, 32, 32), hd=32, nq=20, ndp=2, nh=4, ndl=1, d_ffn=64, nd=0, query_rerank_mode="none"
+        nc=5, ch=(32, 32, 32), hd=32, nq=20, ndp=2, nh=4, ndl=1, d_ffn=64, nd=0
     ).eval()
-    decoder_center_zero = RTDETRDecoder(
+    decoder_center_zero = CenterRTDETRDecoder(
         nc=5,
         ch=(32, 32, 32),
         hd=32,
@@ -126,3 +129,13 @@ def test_rtdetr_decoder_none_matches_center_when_lambda_zero():
     assert torch.allclose(y_none, y_zero, atol=1e-6, rtol=1e-6)
     for a, b in zip(aux_none[:4], aux_zero[:4]):
         assert torch.allclose(a, b, atol=1e-6, rtol=1e-6)
+
+
+@pytest.mark.skipif(not TORCH_1_11, reason="RTDETR requires torch>=1.11")
+def test_center_decoder_yaml_parse():
+    """Center decoder model YAML should instantiate the configured subclass."""
+    model = RTDETRDetectionModel(
+        "ultralytics/cfg/models/rt-detr/rtdetr-l-center.yaml", nc=5, ch=3, verbose=False
+    )
+    head = model.model[-1]
+    assert isinstance(head, CenterRTDETRDecoder)

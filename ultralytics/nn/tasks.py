@@ -39,6 +39,7 @@ from ultralytics.nn.modules import (
     C3x,
     CBFuse,
     CBLinear,
+    CenterRTDETRDecoder,
     Classify,
     Concat,
     Conv,
@@ -66,6 +67,7 @@ from ultralytics.nn.modules import (
     SCDown,
     Segment,
     Segment26,
+    SparseGatedAIFI,
     TorchVision,
     WorldDetect,
     YOLOEDetect,
@@ -766,8 +768,11 @@ class RTDETRDetectionModel(DetectionModel):
         if args is None:
             return
 
-        get = (lambda k, d: args.get(k, d)) if isinstance(args, dict) else (lambda k, d: getattr(args, k, d))
         head = self.model[-1]
+        if not isinstance(head, CenterRTDETRDecoder):
+            return
+
+        get = (lambda k, d: args.get(k, d)) if isinstance(args, dict) else (lambda k, d: getattr(args, k, d))
         head.query_rerank_mode = get("query_rerank_mode", getattr(head, "query_rerank_mode", "none"))
         head.center_lambda_max = get("center_lambda_max", getattr(head, "center_lambda_max", 0.25))
         head.center_lambda_warmup_epochs = get(
@@ -886,8 +891,8 @@ class RTDETRDetectionModel(DetectionModel):
                 embeddings.append(torch.nn.functional.adaptive_avg_pool2d(x, (1, 1)).squeeze(-1).squeeze(-1))  # flatten
                 if m.i == max_idx:
                     return torch.unbind(torch.cat(embeddings, 1), dim=0)
-        head = self.model[-1]
-        x = head([y[j] for j in head.f], batch)  # head inference
+        head = self.model[-1]#提取配置文件的最后一层也就是检测头的模块
+        x = head([y[j] for j in head.f], batch)  # head inference 让检测头进行前向推理，输入是检测头的输入层的输出和batch数据
         return x
 
 
@@ -1683,7 +1688,7 @@ def parse_model(d, ch, verbose=True):
         )  # get module
         for j, a in enumerate(args):
             if isinstance(a, str):
-                with contextlib.suppress(ValueError):
+                with contextlib.suppress(ValueError, SyntaxError):
                     args[j] = locals()[a] if a in locals() else ast.literal_eval(a)
         n = n_ = max(round(n * depth), 1) if n > 1 else n  # depth gain
         if m in base_modules:
@@ -1708,7 +1713,7 @@ def parse_model(d, ch, verbose=True):
                     args.extend((True, 1.2))
             if m is C2fCIB:
                 legacy = False
-        elif m is AIFI:
+        elif m in frozenset({AIFI, SparseGatedAIFI}):
             args = [ch[f], *args]
         elif m in frozenset({HGStem, HGBlock}):
             c1, cm, c2 = ch[f], args[0], args[1]
@@ -1746,7 +1751,7 @@ def parse_model(d, ch, verbose=True):
             args.append([ch[x] for x in f])
         elif m is ImagePoolingAttn:
             args.insert(1, [ch[x] for x in f])  # channels as second arg
-        elif m is RTDETRDecoder:  # special case, channels arg must be passed in index 1
+        elif m in frozenset({RTDETRDecoder, CenterRTDETRDecoder}):  # special case, channels arg must be passed in index 1
             args.insert(1, [ch[x] for x in f])
         elif m is CBLinear:
             c2 = args[0]

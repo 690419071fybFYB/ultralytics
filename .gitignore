@@ -206,3 +206,5 @@ calibration_*.npy
 # Training logs
 args.yaml
 results.csv
+tmp/dior_smoke_jpg/labels
+tmp/
