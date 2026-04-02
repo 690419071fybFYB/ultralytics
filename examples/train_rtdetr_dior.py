@@ -27,14 +27,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--data",
         type=str,
-        default="/home/fyb/datasets/DIOR_COCO_ULTRA/dior_coco_ultralytics.yaml",
+        default="/home/gpcvgroup/fyb/datasets/DIOR_COCO_ULTRA/dior_ultralytics.yaml",
         help="Dataset YAML path.",
     )
     parser.add_argument("--epochs", type=int, default=100, help="Number of training epochs.")
     parser.add_argument("--imgsz", type=int, default=512, help="Training image size.")
     parser.add_argument("--batch", type=int, default=16, help="Batch size.")
     parser.add_argument("--device", type=str, default="0", help='Device, e.g. "0", "0,1", or "cpu".')
-    parser.add_argument("--workers", type=int, default=1, help="Data loader workers.")
+    parser.add_argument("--workers", type=int, default=4, help="Data loader workers.")
     parser.add_argument(
         "--cache",
         type=str,
@@ -42,8 +42,8 @@ def parse_args() -> argparse.Namespace:
         choices=("disk", "ram", "false"),
         help="Cache mode: disk, ram, or false.",
     )
-    parser.add_argument("--project", type=str, default="runs/train", help="Output project directory.")
-    parser.add_argument("--name", type=str, default="rtdetr_dior", help="Experiment name.")
+    parser.add_argument("--project", type=str, default="RTDETR_exps", help="Output project directory.")
+    parser.add_argument("--name", type=str, default="rtdetr_dior_baseline", help="Experiment name.")
     parser.add_argument("--patience", type=int, default=10, help="Early stopping patience.")
     parser.add_argument("--exist-ok", action="store_true", help="Allow existing project/name directory.")
     parser.add_argument("--resume", action="store_true", help="Resume from latest checkpoint.")
