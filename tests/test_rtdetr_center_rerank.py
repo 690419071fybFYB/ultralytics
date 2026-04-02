@@ -132,6 +132,77 @@ def test_rtdetr_decoder_none_matches_center_when_lambda_zero():
 
 
 @pytest.mark.skipif(not TORCH_1_11, reason="RTDETR requires torch>=1.11")
+def test_center_geom_fusion_matches_formula():
+    """Geometric fusion should map cls/center ranks to probabilities and fuse with geometric mean."""
+    decoder = CenterRTDETRDecoder(
+        nc=5,
+        ch=(32, 32, 32),
+        hd=32,
+        nq=20,
+        ndp=2,
+        nh=4,
+        ndl=1,
+        d_ffn=64,
+        nd=0,
+        query_rerank_mode="center",
+        center_fusion_strategy="geom",
+        center_lambda_max=0.75,
+        center_score_clip=0.0,
+    ).eval()
+    cls_rank = torch.tensor([[-2.0, 0.0, 2.0]], dtype=torch.float32)
+    center_rank = torch.tensor([[-1.5, 0.5, 1.5]], dtype=torch.float32)
+
+    fused = decoder._fuse_query_scores(cls_rank, center_rank)
+    expected = torch.sqrt(torch.sigmoid(cls_rank) * torch.sigmoid(0.75 * center_rank))
+
+    assert torch.allclose(fused, expected, atol=1e-6, rtol=1e-6)
+    assert torch.all((fused >= 0.0) & (fused <= 1.0))
+
+
+@pytest.mark.skipif(not TORCH_1_11, reason="RTDETR requires torch>=1.11")
+def test_center_add_and_geom_fusion_differ():
+    """Additive and geometric center fusion should produce different rankings for the same inputs."""
+    cls_rank = torch.tensor([[-1.0, 0.2, 1.2]], dtype=torch.float32)
+    center_rank = torch.tensor([[-0.5, 0.1, 1.0]], dtype=torch.float32)
+
+    decoder_add = CenterRTDETRDecoder(
+        nc=5,
+        ch=(32, 32, 32),
+        hd=32,
+        nq=20,
+        ndp=2,
+        nh=4,
+        ndl=1,
+        d_ffn=64,
+        nd=0,
+        query_rerank_mode="center",
+        center_fusion_strategy="add",
+        center_lambda_max=0.35,
+        center_score_clip=0.0,
+    ).eval()
+    decoder_geom = CenterRTDETRDecoder(
+        nc=5,
+        ch=(32, 32, 32),
+        hd=32,
+        nq=20,
+        ndp=2,
+        nh=4,
+        ndl=1,
+        d_ffn=64,
+        nd=0,
+        query_rerank_mode="center",
+        center_fusion_strategy="geom",
+        center_lambda_max=0.35,
+        center_score_clip=0.0,
+    ).eval()
+
+    fused_add = decoder_add._fuse_query_scores(cls_rank, center_rank)
+    fused_geom = decoder_geom._fuse_query_scores(cls_rank, center_rank)
+
+    assert not torch.allclose(fused_add, fused_geom)
+
+
+@pytest.mark.skipif(not TORCH_1_11, reason="RTDETR requires torch>=1.11")
 def test_center_decoder_yaml_parse():
     """Center decoder model YAML should instantiate the configured subclass."""
     model = RTDETRDetectionModel(

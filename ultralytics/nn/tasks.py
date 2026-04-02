@@ -774,6 +774,7 @@ class RTDETRDetectionModel(DetectionModel):
 
         get = (lambda k, d: args.get(k, d)) if isinstance(args, dict) else (lambda k, d: getattr(args, k, d))
         head.query_rerank_mode = get("query_rerank_mode", getattr(head, "query_rerank_mode", "none"))
+        head.center_fusion_strategy = get("center_fusion_strategy", getattr(head, "center_fusion_strategy", "add"))
         head.center_lambda_max = get("center_lambda_max", getattr(head, "center_lambda_max", 0.25))
         head.center_lambda_warmup_epochs = get(
             "center_lambda_warmup_epochs", getattr(head, "center_lambda_warmup_epochs", 10)

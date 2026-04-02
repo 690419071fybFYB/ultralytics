@@ -68,6 +68,7 @@ class RTDETRTrainer(DetectionTrainer):
             return
         # Force-set for backward compatibility with old checkpoints that may not contain new attrs.
         head.query_rerank_mode = self.args.query_rerank_mode
+        head.center_fusion_strategy = self.args.center_fusion_strategy
         head.center_lambda_max = self.args.center_lambda_max
         head.center_lambda_warmup_epochs = self.args.center_lambda_warmup_epochs
         head.center_score_norm = self.args.center_score_norm

@@ -40,6 +40,7 @@ multi_scale: 0.0 # (float) multi-scale range as a fraction of imgsz; sizes are r
 compile: False # (bool | str) enable torch.compile() backend='inductor'; True="default", False=off, or "default|reduce-overhead|max-autotune-no-cudagraphs"
 # RT-DETR center-aware query reranking (Phase 1)
 query_rerank_mode: none # (str) RT-DETR query rerank mode: 'none' or 'center'
+center_fusion_strategy: add # (str) center/class fusion strategy: 'add' or 'geom'
 center_lambda_max: 0.25 # (float) max lambda for center-aware reranking
 center_lambda_warmup_epochs: 10 # (int) warmup epochs to ramp lambda from 0 to max
 center_score_norm: zscore_image # (str) score normalization mode for reranking, e.g. 'zscore_image'

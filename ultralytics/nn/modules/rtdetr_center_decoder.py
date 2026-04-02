@@ -30,6 +30,7 @@ class CenterRTDETRDecoder(RTDETRDecoder):
         box_noise_scale: float = 1.0,
         learnt_init_query: bool = False,
         query_rerank_mode: str = "center",
+        center_fusion_strategy: str = "add",
         center_lambda_max: float = 0.25,
         center_lambda_warmup_epochs: int = 10,
         center_score_norm: str = "zscore_image",
@@ -55,6 +56,7 @@ class CenterRTDETRDecoder(RTDETRDecoder):
         )
         # 这几个属性控制“分类分数 + 中心性分数”的联合排序行为。
         self.query_rerank_mode = query_rerank_mode
+        self.center_fusion_strategy = center_fusion_strategy
         self.center_lambda_max = center_lambda_max
         self.center_lambda_warmup_epochs = center_lambda_warmup_epochs
         self.center_score_norm = center_score_norm
@@ -137,10 +139,7 @@ class CenterRTDETRDecoder(RTDETRDecoder):
             else:
                 cls_rank = cls_scores
                 center_rank = enc_outputs_center
-            fused_scores = cls_rank + self._center_lambda(batch) * center_rank
-            score_clip = float(getattr(self, "center_score_clip", 6.0))
-            if score_clip > 0:
-                fused_scores = fused_scores.clamp(-score_clip, score_clip)
+            fused_scores = self._fuse_query_scores(cls_rank, center_rank, batch=batch)
             query_scores = fused_scores
             center_logits = enc_outputs_center
         else:
@@ -197,3 +196,30 @@ class CenterRTDETRDecoder(RTDETRDecoder):
         epoch = float(batch["epoch"])
         ratio = min(max(epoch / warmup_epochs, 0.0), 1.0)
         return lam * ratio
+
+    def _fuse_query_scores(
+        self,
+        cls_rank: torch.Tensor,
+        center_rank: torch.Tensor,
+        batch: dict | None = None,
+    ) -> torch.Tensor:
+        """Fuse class and center ranks for query selection.
+
+        `add` keeps the current additive baseline.
+        `geom` maps both ranks into (0, 1) and applies geometric-mean fusion, so tokens score highest only when
+        class and center responses are both high.
+        """
+        lam = self._center_lambda(batch)
+        strategy = str(getattr(self, "center_fusion_strategy", "add")).lower()
+        if strategy == "geom":
+            cls_prob = torch.sigmoid(cls_rank)
+            center_prob = torch.sigmoid(lam * center_rank)
+            return torch.sqrt(torch.clamp(cls_prob * center_prob, min=0.0))
+        if strategy != "add":
+            raise ValueError(f"Unsupported center_fusion_strategy: {strategy}")
+
+        fused_scores = cls_rank + lam * center_rank
+        score_clip = float(getattr(self, "center_score_clip", 6.0))
+        if score_clip > 0:
+            fused_scores = fused_scores.clamp(-score_clip, score_clip)
+        return fused_scores

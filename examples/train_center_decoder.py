@@ -14,6 +14,7 @@ model.train(
     seed=0,
     patience=10,
     query_rerank_mode="center",
+    center_fusion_strategy="geom",
     center_lambda_max=0.35,
     center_lambda_warmup_epochs=10,
     center_score_norm="zscore_image",

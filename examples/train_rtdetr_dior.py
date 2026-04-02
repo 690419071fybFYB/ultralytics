@@ -52,6 +52,13 @@ def parse_args() -> argparse.Namespace:
         choices=("none", "center"),
         help="RT-DETR query rerank mode.",
     )
+    parser.add_argument(
+        "--center-fusion-strategy",
+        type=str,
+        default="geom",
+        choices=("add", "geom"),
+        help="Fusion strategy for cls rank and center rank.",
+    )
     parser.add_argument("--center-lambda-max", type=float, default=0.25, help="Max lambda for center reranking.")
     parser.add_argument(
         "--center-lambda-warmup-epochs",
@@ -105,6 +112,7 @@ def main() -> None:
         name=args.name,
         patience=args.patience,
         query_rerank_mode=args.query_rerank_mode,
+        center_fusion_strategy=args.center_fusion_strategy,
         center_lambda_max=args.center_lambda_max,
         center_lambda_warmup_epochs=args.center_lambda_warmup_epochs,
         center_score_norm=args.center_score_norm,
