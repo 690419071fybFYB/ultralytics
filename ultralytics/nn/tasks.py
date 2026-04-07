@@ -25,6 +25,10 @@ from ultralytics.nn.modules import (
     SPP,
     SPPELAN,
     SPPF,
+    AGDown,
+    AGUp,
+    AGDownV2,
+    AGUpV2,
     A2C2f,
     AConv,
     ADown,
@@ -56,6 +60,7 @@ from ultralytics.nn.modules import (
     ImagePoolingAttn,
     Index,
     LRPCHead,
+    MGDIFI,
     Pose,
     Pose26,
     RepC3,
@@ -861,7 +866,7 @@ class RTDETRDetectionModel(DetectionModel):
             [loss[k].detach() for k in ["loss_giou", "loss_class", "loss_bbox"]], device=img.device
         )
 
-    def predict(self, x, profile=False, visualize=False, batch=None, augment=False, embed=None):
+    def predict(self, x, profile=False, visualize=False, batch=None, augment=False, embed=None, mab_prior=None):
         """Perform a forward pass through the model.
 
         Args:
@@ -871,6 +876,7 @@ class RTDETRDetectionModel(DetectionModel):
             batch (dict, optional): Ground truth data for evaluation.
             augment (bool): If True, perform data augmentation during inference.
             embed (list, optional): A list of layer indices to return embeddings from.
+            mab_prior (torch.Tensor, optional): External morphology prior forwarded to MGDIFI blocks.
 
         Returns:
             (torch.Tensor): Model's output tensor.
@@ -884,7 +890,7 @@ class RTDETRDetectionModel(DetectionModel):
                 x = y[m.f] if isinstance(m.f, int) else [x if j == -1 else y[j] for j in m.f]  # from earlier layers
             if profile:
                 self._profile_one_layer(m, x, dt)
-            x = m(x)  # run
+            x = m(x, mab_prior=mab_prior) if isinstance(m, MGDIFI) else m(x)  # run
             y.append(x if m.i in self.save else None)  # save output
             if visualize:
                 feature_visualization(x, m.type, m.i, save_dir=visualize)
@@ -1632,6 +1638,10 @@ def parse_model(d, ch, verbose=True):
             GhostBottleneck,
             SPP,
             SPPF,
+            AGDown,
+            AGUp,
+            AGDownV2,
+            AGUpV2,
             C2fPSA,
             C2PSA,
             DWConv,
@@ -1714,7 +1724,7 @@ def parse_model(d, ch, verbose=True):
                     args.extend((True, 1.2))
             if m is C2fCIB:
                 legacy = False
-        elif m in frozenset({AIFI, SparseGatedAIFI}):
+        elif m in frozenset({AIFI, SparseGatedAIFI, MGDIFI}):
             args = [ch[f], *args]
         elif m in frozenset({HGStem, HGBlock}):
             c1, cm, c2 = ch[f], args[0], args[1]

@@ -160,3 +160,161 @@ class SparseGatedAIFI(TransformerEncoderLayer):
             tokens = self.norm2(tokens)
 
         return tokens.permute(0, 2, 1).view(b, c, h, w).contiguous()
+
+
+class MGDIFI(TransformerEncoderLayer):
+    """Morphology-guided decoupled intra-scale feature interaction."""
+
+    def __init__(
+        self,
+        c1: int,
+        cm: int = 2048,
+        num_heads: int = 8,
+        dropout: float = 0.0,
+        act: nn.Module | None = None,
+        normalize_before: bool = False,
+        mab_cfg: dict | None = None,
+    ):
+        """Initialize MGDIFI with optional internal morphology-aware prior generation.
+
+        Args:
+            c1 (int): Input dimension.
+            cm (int): Hidden dimension in the feedforward network.
+            num_heads (int): Number of attention heads.
+            dropout (float): Dropout probability.
+            act (nn.Module | None): Activation function. Defaults to GELU when omitted.
+            normalize_before (bool): Whether to apply normalization before attention and feedforward.
+            mab_cfg (dict | None): Optional internal MAB configuration passed from YAML.
+        """
+        act = act if act is not None else nn.GELU()
+        super().__init__(c1, cm, num_heads, dropout, act, normalize_before)
+        mab_cfg = mab_cfg or {}
+        self.use_internal_mab = bool(mab_cfg.get("use_internal_mab", True))
+        self.mab_kernel_size = int(mab_cfg.get("kernel_size", 5))
+        self.mab_hidden_ratio = float(mab_cfg.get("hidden_ratio", 0.25))
+        self.mab_detach_input = bool(mab_cfg.get("detach_input", False))
+        if self.mab_kernel_size < 1 or self.mab_kernel_size % 2 == 0:
+            raise ValueError("MGDIFI mab_cfg.kernel_size must be a positive odd integer.")
+        if self.mab_hidden_ratio <= 0:
+            raise ValueError("MGDIFI mab_cfg.hidden_ratio must be > 0.")
+
+        self.fg_proj = nn.Conv2d(c1 + 1, 1, kernel_size=1, stride=1, padding=0, bias=True)
+        self.gate_proj = nn.Conv2d(c1, 1, kernel_size=1, stride=1, padding=0, bias=True)
+        self.fuse_proj = nn.Conv2d(c1 * 2, c1, kernel_size=1, stride=1, padding=0, bias=True)
+        mab_hidden = max(8, int(round(c1 * self.mab_hidden_ratio)))
+        self.mab_stem = nn.Sequential(
+            nn.Conv2d(c1, mab_hidden, kernel_size=1, stride=1, padding=0, bias=True),
+            nn.GELU(),
+            nn.Conv2d(
+                mab_hidden,
+                mab_hidden,
+                kernel_size=3,
+                stride=1,
+                padding=1,
+                groups=mab_hidden,
+                bias=True,
+            ),
+            nn.GELU(),
+        )
+        self.mab_seed_proj = nn.Conv2d(mab_hidden, 1, kernel_size=1, stride=1, padding=0, bias=True)
+        self.mab_fuse_proj = nn.Conv2d(4, 1, kernel_size=1, stride=1, padding=0, bias=True)
+
+        # Keep learnable coefficients bounded through sigmoid during forward.
+        self.alpha = nn.Parameter(torch.tensor(0.0))
+        self.beta = nn.Parameter(torch.tensor(0.0))
+
+    def _build_internal_mab_prior(self, x: torch.Tensor) -> torch.Tensor:
+        """Build a soft single-channel morphology prior directly from the current feature map."""
+        x_in = x.detach() if self.mab_detach_input else x
+        seed_feat = self.mab_stem(x_in)
+        seed = torch.sigmoid(self.mab_seed_proj(seed_feat))
+        pad = self.mab_kernel_size // 2
+
+        # Morphology-aware auxiliary cues from differentiable dilation/erosion surrogates.
+        dilation = F.max_pool2d(seed, kernel_size=self.mab_kernel_size, stride=1, padding=pad)
+        erosion = -F.max_pool2d(-seed, kernel_size=self.mab_kernel_size, stride=1, padding=pad)
+        gradient = dilation - erosion
+        local_mean = F.avg_pool2d(seed, kernel_size=self.mab_kernel_size, stride=1, padding=pad)
+        contrast = (seed - local_mean).abs()
+
+        prior = self.mab_fuse_proj(torch.cat((seed, dilation, gradient, contrast), dim=1))
+        return torch.sigmoid(prior).clamp_(0.0, 1.0)
+
+    def _align_mab_prior(self, mab_prior: torch.Tensor | None, x: torch.Tensor) -> torch.Tensor:
+        """Align the morphology prior to the current feature resolution."""
+        b, _, h, w = x.shape
+        if mab_prior is None:
+            if self.use_internal_mab:
+                return self._build_internal_mab_prior(x)
+            return x.new_zeros((b, 1, h, w))
+        if mab_prior.ndim == 3:
+            mab_prior = mab_prior.unsqueeze(1)
+        if mab_prior.ndim != 4 or mab_prior.shape[1] != 1:
+            raise ValueError(f"Expected mab_prior with shape [B, 1, H, W], but got {tuple(mab_prior.shape)}")
+        mab_prior = F.interpolate(
+            mab_prior.to(device=x.device, dtype=x.dtype), size=(h, w), mode="bilinear", align_corners=False
+        )
+        # Treat morphology guidance as a soft prior in [0, 1] to avoid unstable amplification from bad inputs.
+        return mab_prior.clamp_(0.0, 1.0)
+
+    def _shared_attention(self, x: torch.Tensor, pos: torch.Tensor) -> torch.Tensor:
+        """Apply the shared attention weights to one decoupled branch."""
+        b, c, h, w = x.shape
+        tokens = x.flatten(2).permute(0, 2, 1)
+        q = k = self.with_pos_embed(tokens, pos)
+        out = self.ma(q, k, value=tokens)[0]
+        return out.permute(0, 2, 1).view(b, c, h, w).contiguous()
+
+    def _morphology_guided_interaction(
+        self, x: torch.Tensor, residual: torch.Tensor, mab_prior: torch.Tensor | None, pos: torch.Tensor
+    ) -> torch.Tensor:
+        """Run morphology-guided foreground/background decoupling and fusion."""
+        # Morphology prior alignment.
+        mab = self._align_mab_prior(mab_prior, x)
+        alpha = torch.sigmoid(self.alpha).to(device=x.device, dtype=x.dtype)
+        beta = torch.sigmoid(self.beta).to(device=x.device, dtype=x.dtype)
+
+        # Foreground/background decoupling.
+        x_cat = torch.cat((x, mab), dim=1)
+        m_fg = torch.sigmoid(self.fg_proj(x_cat))
+        m_bg = 1.0 - m_fg
+
+        x_fg = x * m_fg * (1.0 + beta * mab)
+        x_bg = x * m_bg
+
+        # Shared attention over the decoupled branches.
+        y_fg = self._shared_attention(x_fg, pos)
+        y_bg = self._shared_attention(x_bg, pos)
+
+        # Target-guided background suppression.
+        gate = torch.sigmoid(self.gate_proj(y_fg))
+        y_bg_supp = y_bg * (1.0 - gate)
+
+        # Decoupled fusion with residual restoration.
+        y_dec = y_fg - alpha * y_bg_supp
+        fused = self.fuse_proj(torch.cat((y_fg, y_dec), dim=1))
+        return residual + self.dropout1(fused)
+
+    def forward(self, x: torch.Tensor, mab_prior: torch.Tensor | None = None) -> torch.Tensor:
+        """Forward pass for MGDIFI on [B, C, H, W] inputs."""
+        b, c, h, w = x.shape
+        pos = AIFI.build_2d_sincos_position_embedding(w, h, c).to(device=x.device, dtype=x.dtype)
+
+        if self.normalize_before:
+            # Match TransformerEncoderLayer.forward_pre(): pre-norm attention, residual add, then pre-norm FFN.
+            norm_tokens = self.norm1(x.flatten(2).permute(0, 2, 1))
+            norm_x = norm_tokens.permute(0, 2, 1).view(b, c, h, w).contiguous()
+            y_fuse = self._morphology_guided_interaction(norm_x, x, mab_prior, pos)
+            tokens = y_fuse.flatten(2).permute(0, 2, 1)
+            ff_tokens = self.norm2(tokens)
+            ff_tokens = self.fc2(self.dropout(self.act(self.fc1(ff_tokens))))
+            tokens = tokens + self.dropout2(ff_tokens)
+        else:
+            # Match TransformerEncoderLayer.forward_post(): attention path first, then norm, then FFN + residual.
+            y_fuse = self._morphology_guided_interaction(x, x, mab_prior, pos)
+            tokens = self.norm1(y_fuse.flatten(2).permute(0, 2, 1))
+            ff_tokens = self.fc2(self.dropout(self.act(self.fc1(tokens))))
+            tokens = tokens + self.dropout2(ff_tokens)
+            tokens = self.norm2(tokens)
+
+        return tokens.permute(0, 2, 1).view(b, c, h, w).contiguous()

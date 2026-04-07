@@ -9,7 +9,7 @@ import torch.nn.functional as F
 
 from ultralytics.utils.torch_utils import fuse_conv_and_bn
 
-from .conv import Conv, DWConv, GhostConv, LightConv, RepConv, autopad
+from .conv import Conv, ConvTranspose, DWConv, GhostConv, LightConv, RepConv, autopad
 from .transformer import TransformerBlock
 
 __all__ = (
@@ -25,6 +25,10 @@ __all__ = (
     "SPP",
     "SPPELAN",
     "SPPF",
+    "AGDown",
+    "AGUp",
+    "AGDownV2",
+    "AGUpV2",
     "AConv",
     "ADown",
     "Attention",
@@ -960,6 +964,159 @@ class ADown(nn.Module):
         x2 = torch.nn.functional.max_pool2d(x2, 3, 2, 1)
         x2 = self.cv2(x2)
         return torch.cat((x1, x2), 1)
+
+
+class _GlobalPoolGate(nn.Module):
+    """Generate per-channel gating weights from global pooled input features."""
+
+    def __init__(self, c1: int, c2: int):
+        """Initialize the channel gate."""
+        super().__init__()
+        self.pool = nn.AdaptiveAvgPool2d(1)
+        self.proj = nn.Conv2d(c1, c2, 1, 1, bias=True)
+        self.act = nn.Sigmoid()
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Return broadcastable channel weights in the range [0, 1]."""
+        return self.act(self.proj(self.pool(x)))
+
+
+class _LocalDetailGate(nn.Module):
+    """Generate a spatially-aware detail gate from local features."""
+
+    def __init__(self, c1: int, c2: int, stride: int = 2):
+        """Initialize the local detail gate."""
+        super().__init__()
+        self.cv1 = DWConv(c1, c1, 3, 1)
+        self.cv2 = DWConv(c1, c1, 3, stride)
+        self.proj = nn.Conv2d(c1, c2, 1, 1, bias=True)
+        self.act = nn.Sigmoid()
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Return a spatial gate aligned with the target output resolution."""
+        return self.act(self.proj(self.cv2(self.cv1(x))))
+
+
+class AGDown(nn.Module):
+    """Attention-gated downsampling with parallel convolution and pooling branches."""
+
+    def __init__(self, c1: int, c2: int):
+        """Initialize AGDown.
+
+        Args:
+            c1 (int): Input channels.
+            c2 (int): Output channels. Must be at least 2 so both branches remain valid.
+        """
+        super().__init__()
+        if c2 < 2:
+            raise ValueError(f"AGDown requires c2 >= 2, but got c2={c2}.")
+        c_ = c2 // 2
+        self.stride = 2
+        self.cv1 = Conv(c1, c_, 3, 2, 1)
+        self.cv2 = Conv(c1, c2 - c_, 1, 1, 0)
+        self.pool = nn.MaxPool2d(kernel_size=2, stride=2)
+        self.gate = _GlobalPoolGate(c1, c2)
+        self.cv3 = Conv(c2, c2, 1, 1)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Fuse two downsampled branches and modulate them with a global channel gate."""
+        y = torch.cat((self.cv1(x), self.cv2(self.pool(x))), 1)
+        return self.cv3(y * self.gate(x))
+
+
+class AGUp(nn.Module):
+    """Attention-gated upsampling with transposed-convolution and interpolation branches."""
+
+    def __init__(self, c1: int, c2: int, mode: str = "nearest"):
+        """Initialize AGUp.
+
+        Args:
+            c1 (int): Input channels.
+            c2 (int): Output channels. Must be at least 2 so both branches remain valid.
+            mode (str): Interpolation mode for the lightweight upsample branch.
+        """
+        super().__init__()
+        if c2 < 2:
+            raise ValueError(f"AGUp requires c2 >= 2, but got c2={c2}.")
+        c_ = c2 // 2
+        self.scale_factor = 2
+        self.mode = mode
+        self.cv1 = ConvTranspose(c1, c_, 2, 2, 0)
+        self.cv2 = Conv(c1, c2 - c_, 1, 1, 0)
+        self.gate = _GlobalPoolGate(c1, c2)
+        self.cv3 = Conv(c2, c2, 1, 1)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Fuse two upsampled branches and modulate them with a global channel gate."""
+        y = torch.cat((self.cv1(x), self.cv2(F.interpolate(x, scale_factor=2, mode=self.mode))), 1)
+        return self.cv3(y * self.gate(x))
+
+
+class AGDownV2(nn.Module):
+    """Detail-biased attention-gated downsampling."""
+
+    def __init__(self, c1: int, c2: int):
+        """Initialize AGDownV2.
+
+        Args:
+            c1 (int): Input channels.
+            c2 (int): Output channels. Must be at least 2 so both branches remain valid.
+        """
+        super().__init__()
+        if c2 < 2:
+            raise ValueError(f"AGDownV2 requires c2 >= 2, but got c2={c2}.")
+        c_ = c2 // 2
+        self.stride = 2
+        self.main = Conv(c1, c_, 3, 2, 1)
+        self.pool = nn.AvgPool2d(kernel_size=2, stride=2)
+        self.aux = Conv(c1, c2 - c_, 1, 1, 0)
+        self.channel_gate = _GlobalPoolGate(c1, c2)
+        self.detail_gate = _LocalDetailGate(c1, c2, stride=2)
+        self.fuse = Conv(c2, c2, 1, 1)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Downsample while preserving detail through local and global gating."""
+        y = torch.cat((self.main(x), self.aux(self.pool(x))), 1)
+        y = y * self.channel_gate(x) * self.detail_gate(x)
+        return self.fuse(y)
+
+
+class AGUpV2(nn.Module):
+    """Detail-biased attention-gated upsampling."""
+
+    def __init__(self, c1: int, c2: int, mode: str = "nearest"):
+        """Initialize AGUpV2.
+
+        Args:
+            c1 (int): Input channels.
+            c2 (int): Output channels. Must be at least 2 so both branches remain valid.
+            mode (str): Interpolation mode for the lightweight upsample branch.
+        """
+        super().__init__()
+        if c2 < 2:
+            raise ValueError(f"AGUpV2 requires c2 >= 2, but got c2={c2}.")
+        c_ = c2 // 2
+        self.scale_factor = 2
+        self.mode = mode
+        self.deconv = ConvTranspose(c1, c_, 2, 2, 0)
+        self.interp_proj = Conv(c1, c2 - c_, 1, 1, 0)
+        self.detail_dw = DWConv(c1, c1, 3, 1)
+        self.detail_proj = Conv(c1, c2, 1, 1, act=False)
+        self.channel_gate = _GlobalPoolGate(c1, c2)
+        self.fuse = Conv(c2, c2, 1, 1)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Upsample features and reinject detail before fusion."""
+        y = torch.cat(
+            (
+                self.deconv(x),
+                self.interp_proj(F.interpolate(x, scale_factor=self.scale_factor, mode=self.mode)),
+            ),
+            1,
+        )
+        detail = F.interpolate(self.detail_proj(self.detail_dw(x)), scale_factor=self.scale_factor, mode=self.mode)
+        y = y * self.channel_gate(x) * torch.sigmoid(detail)
+        return self.fuse(y + detail)
 
 
 class SPPELAN(nn.Module):

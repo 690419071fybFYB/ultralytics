@@ -30,6 +30,10 @@ from .block import (
     SPP,
     SPPELAN,
     SPPF,
+    AGDown,
+    AGUp,
+    AGDownV2,
+    AGUpV2,
     A2C2f,
     AConv,
     ADown,
@@ -94,7 +98,7 @@ from .head import (
     v10Detect,
 )
 from .rtdetr_center_decoder import CenterRTDETRDecoder
-from .rtdetr_aifi_experimental import SparseGatedAIFI
+from .rtdetr_aifi_experimental import MGDIFI, SparseGatedAIFI
 from .transformer import (
     AIFI,
     MLP,
@@ -126,6 +130,10 @@ __all__ = (
     "SPP",
     "SPPELAN",
     "SPPF",
+    "AGDown",
+    "AGUp",
+    "AGDownV2",
+    "AGUpV2",
     "A2C2f",
     "AConv",
     "ADown",
@@ -172,6 +180,7 @@ __all__ = (
     "Proto",
     "RTDETRDecoder",
     "CenterRTDETRDecoder",
+    "MGDIFI",
     "SparseGatedAIFI",
     "RepC3",
     "RepConv",
