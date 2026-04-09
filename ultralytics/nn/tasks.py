@@ -13,6 +13,7 @@ import torch.nn as nn
 from ultralytics.nn.autobackend import check_class_names
 from ultralytics.nn.modules import (
     AIFI,
+    AFEM,
     C1,
     C2,
     C2PSA,
@@ -1638,6 +1639,7 @@ def parse_model(d, ch, verbose=True):
             GhostBottleneck,
             SPP,
             SPPF,
+            AFEM,
             AGDown,
             AGUp,
             AGDownV2,

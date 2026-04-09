@@ -79,6 +79,22 @@ def test_mgdifi_internal_mab_prior_shape_and_range():
 
 
 @pytest.mark.skipif(not TORCH_1_11, reason="RT-DETR requires torch>=1.11")
+def test_mgdifi_backward_pass_without_inplace_error():
+    """MGDIFI training path should backprop without inplace-autograd errors."""
+    from ultralytics.nn.modules import MGDIFI
+
+    x = torch.randn(2, 256, 20, 20, requires_grad=True)
+    m = MGDIFI(256, 1024, 8).train()
+
+    y = m(x)
+    loss = y.mean()
+    loss.backward()
+
+    assert x.grad is not None
+    assert torch.isfinite(x.grad).all()
+
+
+@pytest.mark.skipif(not TORCH_1_11, reason="RT-DETR requires torch>=1.11")
 def test_mgdifi_uses_internal_mab_when_prior_missing():
     """MGDIFI should synthesize an internal prior when forward() is called without mab_prior."""
     from ultralytics.nn.modules import MGDIFI

@@ -238,7 +238,7 @@ class MGDIFI(TransformerEncoderLayer):
         contrast = (seed - local_mean).abs()
 
         prior = self.mab_fuse_proj(torch.cat((seed, dilation, gradient, contrast), dim=1))
-        return torch.sigmoid(prior).clamp_(0.0, 1.0)
+        return torch.sigmoid(prior).clamp(0.0, 1.0)
 
     def _align_mab_prior(self, mab_prior: torch.Tensor | None, x: torch.Tensor) -> torch.Tensor:
         """Align the morphology prior to the current feature resolution."""
@@ -255,7 +255,7 @@ class MGDIFI(TransformerEncoderLayer):
             mab_prior.to(device=x.device, dtype=x.dtype), size=(h, w), mode="bilinear", align_corners=False
         )
         # Treat morphology guidance as a soft prior in [0, 1] to avoid unstable amplification from bad inputs.
-        return mab_prior.clamp_(0.0, 1.0)
+        return mab_prior.clamp(0.0, 1.0)
 
     def _shared_attention(self, x: torch.Tensor, pos: torch.Tensor) -> torch.Tensor:
         """Apply the shared attention weights to one decoupled branch."""
