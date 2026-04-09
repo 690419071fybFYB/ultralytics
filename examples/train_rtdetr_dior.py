@@ -27,7 +27,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--data",
         type=str,
-        default="/home/fyb/datasets/DIOR_COCO_ULTRA/dior_coco_ultralytics.yaml",
+        default="/home/gpcvgroup/fyb/datasets/DIOR_COCO_ULTRA/dior_ultralytics.yaml",
         help="Dataset YAML path.",
     )
     parser.add_argument("--epochs", type=int, default=100, help="Number of training epochs.")
@@ -42,17 +42,17 @@ def parse_args() -> argparse.Namespace:
         choices=("disk", "ram", "false"),
         help="Cache mode: disk, ram, or false.",
     )
-    parser.add_argument("--project", type=str, default="runs/train", help="Output project directory.")
-    parser.add_argument("--name", type=str, default="rtdetr_dior", help="Experiment name.")
+    parser.add_argument("--project", type=str, default="center", help="Output project directory.")
+    parser.add_argument("--name", type=str, default="center035", help="Experiment name.")
     parser.add_argument("--patience", type=int, default=10, help="Early stopping patience.")
     parser.add_argument(
         "--query-rerank-mode",
         type=str,
-        default="none",
+        default="center",
         choices=("none", "center"),
         help="RT-DETR query rerank mode.",
     )
-    parser.add_argument("--center-lambda-max", type=float, default=0.25, help="Max lambda for center reranking.")
+    parser.add_argument("--center-lambda-max", type=float, default=0.35, help="Max lambda for center reranking.")
     parser.add_argument(
         "--center-lambda-warmup-epochs",
         type=int,

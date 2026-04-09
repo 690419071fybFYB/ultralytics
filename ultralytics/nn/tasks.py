@@ -47,6 +47,8 @@ from ultralytics.nn.modules import (
     Detect,
     DWConv,
     DWConvTranspose2d,
+    DetailInject,
+    DetailInjectLite,
     Focus,
     GhostBottleneck,
     GhostConv,
@@ -1710,6 +1712,12 @@ def parse_model(d, ch, verbose=True):
                 legacy = False
         elif m is AIFI:
             args = [ch[f], *args]
+        elif m in frozenset({DetailInject, DetailInjectLite}):
+            if not isinstance(f, (list, tuple)) or len(f) != 2:
+                raise ValueError(f"{m.__name__} expects exactly 2 input indices, got {f}.")
+            c_sem, c_detail = ch[f[0]], ch[f[1]]
+            c2 = args[0] if args else c_sem
+            args = [c_sem, c_detail, *args]
         elif m in frozenset({HGStem, HGBlock}):
             c1, cm, c2 = ch[f], args[0], args[1]
             args = [c1, cm, c2, *args[2:]]

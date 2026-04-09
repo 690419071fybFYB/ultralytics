@@ -4,6 +4,8 @@ import pytest
 import torch
 
 from ultralytics.models.utils.loss import RTDETRDetectionLoss
+from ultralytics.nn.modules import DetailInject, DetailInjectLite
+from ultralytics.nn.tasks import RTDETRDetectionModel
 from ultralytics.nn.modules.head import RTDETRDecoder
 from ultralytics.utils.torch_utils import TORCH_1_11
 
@@ -126,3 +128,79 @@ def test_rtdetr_decoder_none_matches_center_when_lambda_zero():
     assert torch.allclose(y_none, y_zero, atol=1e-6, rtol=1e-6)
     for a, b in zip(aux_none[:4], aux_zero[:4]):
         assert torch.allclose(a, b, atol=1e-6, rtol=1e-6)
+
+
+@pytest.mark.skipif(not TORCH_1_11, reason="RTDETR requires torch>=1.11")
+def test_detail_inject_shape_and_gate_range():
+    """DetailInject should align stage1 features, preserve semantic shape, and produce bounded gates."""
+    module = DetailInject(c_sem=256, c_detail=128, c_out=256).eval()
+    semantic = torch.randn(2, 256, 16, 16)
+    detail = torch.randn(2, 128, 128, 128)
+
+    with torch.no_grad():
+        aligned_detail = module._align_detail(detail, semantic.shape[2:])
+        gate = module.gate(torch.cat((semantic, aligned_detail), 1))
+        fused = module((semantic, detail))
+
+    assert aligned_detail.shape == semantic.shape == fused.shape == (2, 256, 16, 16)
+    assert torch.isfinite(fused).all()
+    assert float(gate.min()) >= 0.0
+    assert float(gate.max()) <= 1.0
+
+
+@pytest.mark.skipif(not TORCH_1_11, reason="RTDETR requires torch>=1.11")
+def test_rtdetr_l_with_detail_inject_builds_and_runs_forward():
+    """The RT-DETR-L YAML with DetailInject should build and complete a forward pass."""
+    model = RTDETRDetectionModel("ultralytics/cfg/models/rt-detr/rtdetr-l.yaml", ch=3, nc=80, verbose=False).eval()
+    assert any(isinstance(m, DetailInject) for m in model.model)
+
+    x = torch.randn(1, 3, 64, 64)
+    with torch.no_grad():
+        y, aux = model.predict(x)
+
+    assert y.ndim == 3
+    assert y.shape[0] == 1
+    assert y.shape[2] == 84  # 4 box coords + 80 classes
+    assert len(aux) == 8
+
+
+@pytest.mark.skipif(not TORCH_1_11, reason="RTDETR requires torch>=1.11")
+def test_detail_inject_lite_shape_gate_and_alpha():
+    """DetailInjectLite should preserve shape, produce bounded gates, and expose alpha."""
+    module = DetailInjectLite(c_sem=256, c_detail=128, c_out=256).eval()
+    semantic = torch.randn(2, 256, 16, 16)
+    detail = torch.randn(2, 128, 128, 128)
+
+    with torch.no_grad():
+        aligned_detail = module._align_detail(detail, semantic.shape[2:])
+        channel_gate = module._channel_gate(semantic, aligned_detail)
+        detail_refined = aligned_detail * channel_gate
+        spatial_gate = module._spatial_gate(semantic + detail_refined)
+        fused = module((semantic, detail))
+
+    assert aligned_detail.shape == semantic.shape == fused.shape == (2, 256, 16, 16)
+    assert torch.isfinite(fused).all()
+    assert float(channel_gate.min()) >= 0.0
+    assert float(channel_gate.max()) <= 1.0
+    assert float(spatial_gate.min()) >= 0.0
+    assert float(spatial_gate.max()) <= 1.0
+    assert isinstance(module.alpha, torch.nn.Parameter)
+    assert torch.allclose(module.alpha.detach(), torch.tensor(0.1), atol=1e-6)
+
+
+@pytest.mark.skipif(not TORCH_1_11, reason="RTDETR requires torch>=1.11")
+def test_rtdetr_l_with_detail_inject_lite_builds_and_runs_forward():
+    """The RT-DETR-L YAML with DetailInjectLite should build and complete a forward pass."""
+    model = RTDETRDetectionModel(
+        "ultralytics/cfg/models/rt-detr/rtdetr-l-detailinject-lite.yaml", ch=3, nc=80, verbose=False
+    ).eval()
+    assert any(isinstance(m, DetailInjectLite) for m in model.model)
+
+    x = torch.randn(1, 3, 64, 64)
+    with torch.no_grad():
+        y, aux = model.predict(x)
+
+    assert y.ndim == 3
+    assert y.shape[0] == 1
+    assert y.shape[2] == 84
+    assert len(aux) == 8

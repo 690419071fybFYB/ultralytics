@@ -12,11 +12,13 @@ from torch.nn.init import constant_, xavier_uniform_
 
 from ultralytics.utils.torch_utils import TORCH_1_11
 
-from .conv import Conv
+from .conv import Conv, LightConv
 from .utils import _get_clones, inverse_sigmoid, multi_scale_deformable_attn_pytorch
 
 __all__ = (
     "AIFI",
+    "DetailInject",
+    "DetailInjectLite",
     "MLP",
     "DeformableTransformerDecoder",
     "DeformableTransformerDecoderLayer",
@@ -238,6 +240,170 @@ class AIFI(TransformerEncoderLayer):
         out_h = grid_h.flatten()[..., None] @ omega[None]
 
         return torch.cat([torch.sin(out_w), torch.cos(out_w), torch.sin(out_h), torch.cos(out_h)], 1)[None]
+
+
+class DetailInject(nn.Module):
+    """Inject high-resolution detail features into a lower-resolution semantic feature map."""
+
+    def __init__(
+        self,
+        c_sem: int,
+        c_detail: int,
+        c_out: int | None = None,
+        align_mode: str = "hybrid",
+        gate_type: str = "sigmoid",
+    ):
+        """Initialize a lightweight detail injection module.
+
+        Args:
+            c_sem (int): Semantic branch channels.
+            c_detail (int): Detail branch channels.
+            c_out (int, optional): Output channels. Defaults to semantic channels.
+            align_mode (str): Alignment mode for detail downsampling. Only "hybrid" is supported in v1.
+            gate_type (str): Gate activation type. Only "sigmoid" is supported in v1.
+        """
+        super().__init__()
+        if align_mode != "hybrid":
+            raise ValueError(f"Unsupported align_mode='{align_mode}'. Supported: 'hybrid'.")
+        if gate_type != "sigmoid":
+            raise ValueError(f"Unsupported gate_type='{gate_type}'. Supported: 'sigmoid'.")
+
+        c_out = c_sem if c_out is None else c_out
+        hidden = max(min(c_out // 2, c_detail), 32)
+
+        self.align_mode = align_mode
+        self.gate_type = gate_type
+        self.local_refine = Conv(c_detail, hidden, 3, 1)
+        self.down1 = Conv(hidden, hidden, 3, 2)
+        self.pool = nn.AvgPool2d(kernel_size=2, stride=2)
+        self.down2 = Conv(hidden, hidden, 3, 1)
+        self.down3 = Conv(hidden, hidden, 3, 2)
+        self.detail_proj = Conv(hidden, c_out, 1, 1, act=False)
+        self.semantic_proj = Conv(c_sem, c_out, 1, 1, act=False) if c_sem != c_out else nn.Identity()
+        self.gate = nn.Sequential(nn.Conv2d(c_out * 2, c_out, 1, 1, 0, bias=True), nn.Sigmoid())
+
+    def _align_detail(self, detail: torch.Tensor, target_hw: tuple[int, int]) -> torch.Tensor:
+        """Refine and align the detail feature map to the semantic spatial size."""
+        detail = self.local_refine(detail)
+        detail = self.down1(detail)
+        detail = self.pool(detail)
+        detail = self.down2(detail)
+        detail = self.down3(detail)
+        if detail.shape[2:] != target_hw:
+            detail = F.adaptive_avg_pool2d(detail, target_hw)
+        return self.detail_proj(detail)
+
+    def forward(self, x: list[torch.Tensor] | tuple[torch.Tensor, torch.Tensor]) -> torch.Tensor:
+        """Fuse semantic and detail features with a gated residual injection.
+
+        Args:
+            x (list[torch.Tensor] | tuple[torch.Tensor, torch.Tensor]): `[semantic, detail]` feature tensors.
+
+        Returns:
+            (torch.Tensor): Fused output tensor with the same spatial size as the semantic input.
+        """
+        if len(x) != 2:
+            raise ValueError(f"DetailInject expects exactly 2 inputs, got {len(x)}.")
+
+        semantic, detail = x
+        semantic = self.semantic_proj(semantic)
+        detail = self._align_detail(detail, semantic.shape[2:])
+        gate = self.gate(torch.cat((semantic, detail), 1))
+        return semantic + gate * detail
+
+
+class DetailInjectLite(nn.Module):
+    """Lightweight detail injection with LightConv backbone and mixed channel-spatial gating."""
+
+    def __init__(
+        self,
+        c_sem: int,
+        c_detail: int,
+        c_out: int | None = None,
+        align_mode: str = "hybrid",
+        gate_type: str = "channel_spatial",
+        alpha_init: float = 0.1,
+    ):
+        """Initialize a lightweight v2 detail injection module.
+
+        Args:
+            c_sem (int): Semantic branch channels.
+            c_detail (int): Detail branch channels.
+            c_out (int, optional): Output channels. Defaults to semantic channels.
+            align_mode (str): Alignment mode for detail downsampling. Only "hybrid" is supported in v2.
+            gate_type (str): Gate type. Only "channel_spatial" is supported in v2.
+            alpha_init (float): Initial value for the learnable residual scaling factor.
+        """
+        super().__init__()
+        if align_mode != "hybrid":
+            raise ValueError(f"Unsupported align_mode='{align_mode}'. Supported: 'hybrid'.")
+        if gate_type != "channel_spatial":
+            raise ValueError(f"Unsupported gate_type='{gate_type}'. Supported: 'channel_spatial'.")
+
+        c_out = c_sem if c_out is None else c_out
+        hidden = max(min(c_detail // 2, c_out // 4), 32)
+        gate_hidden = max(c_out // 4, 32)
+
+        self.align_mode = align_mode
+        self.gate_type = gate_type
+        self.reduce = Conv(c_detail, hidden, 1, 1)
+        self.refine1 = LightConv(hidden, hidden, k=3)
+        self.pool1 = nn.AvgPool2d(kernel_size=2, stride=2)
+        self.refine2 = LightConv(hidden, hidden, k=3)
+        self.pool2 = nn.MaxPool2d(kernel_size=2, stride=2)
+        self.refine3 = LightConv(hidden, hidden, k=3)
+        self.pool3 = nn.AvgPool2d(kernel_size=2, stride=2)
+        self.branch_k3 = LightConv(hidden, hidden, k=3)
+        self.branch_k5 = LightConv(hidden, hidden, k=5)
+        self.detail_proj = Conv(hidden, c_out, 1, 1, act=False)
+        self.semantic_proj = Conv(c_sem, c_out, 1, 1, act=False) if c_sem != c_out else nn.Identity()
+        self.channel_reduce = nn.Sequential(
+            nn.Conv2d(c_out * 2, gate_hidden, 1, 1, 0, bias=False),
+            nn.SiLU(),
+            nn.Conv2d(gate_hidden, c_out, 1, 1, 0, bias=True),
+        )
+        self.spatial_gate = nn.Sequential(nn.Conv2d(2, 1, 7, 1, 3, bias=False), nn.Sigmoid())
+        self.alpha = nn.Parameter(torch.tensor(float(alpha_init)))
+
+    def _align_detail(self, detail: torch.Tensor, target_hw: tuple[int, int]) -> torch.Tensor:
+        """Reduce channels and align the detail feature map to the semantic spatial size."""
+        detail = self.reduce(detail)
+        detail = self.refine1(detail)
+        detail = self.pool1(detail)
+        detail = self.refine2(detail)
+        detail = self.pool2(detail)
+        detail = self.refine3(detail)
+        detail = self.pool3(detail)
+        if detail.shape[2:] != target_hw:
+            detail = F.adaptive_avg_pool2d(detail, target_hw)
+        detail = detail + self.branch_k3(detail) + self.branch_k5(detail)
+        return self.detail_proj(detail)
+
+    def _channel_gate(self, semantic: torch.Tensor, detail: torch.Tensor) -> torch.Tensor:
+        """Build a channel gate from pooled semantic-detail context."""
+        fused = torch.cat((semantic, detail), 1)
+        avg = F.adaptive_avg_pool2d(fused, 1)
+        mx = F.adaptive_max_pool2d(fused, 1)
+        return torch.sigmoid(self.channel_reduce(avg) + self.channel_reduce(mx))
+
+    def _spatial_gate(self, fused: torch.Tensor) -> torch.Tensor:
+        """Build a lightweight spatial gate from channel-refined fused features."""
+        stats = torch.cat((torch.mean(fused, 1, keepdim=True), torch.max(fused, 1, keepdim=True)[0]), 1)
+        return self.spatial_gate(stats)
+
+    def forward(self, x: list[torch.Tensor] | tuple[torch.Tensor, torch.Tensor]) -> torch.Tensor:
+        """Fuse semantic and detail features with channel-first then spatial gating."""
+        if len(x) != 2:
+            raise ValueError(f"DetailInjectLite expects exactly 2 inputs, got {len(x)}.")
+
+        semantic, detail = x
+        semantic = self.semantic_proj(semantic)
+        detail = self._align_detail(detail, semantic.shape[2:])
+        channel_gate = self._channel_gate(semantic, detail)
+        detail = detail * channel_gate
+        fused = semantic + detail
+        spatial_gate = self._spatial_gate(fused)
+        return semantic + self.alpha * detail * spatial_gate
 
 
 class TransformerLayer(nn.Module):
